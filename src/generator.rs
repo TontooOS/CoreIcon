@@ -792,9 +792,9 @@ impl IconCanvas {
         }
     }
 
-    /// Draw a subtle white highlight just inside the rounded-rect edge.
-    /// Blends onto the existing pixels — no extra layer needed, follows
-    /// the corner radius exactly.
+    /// Directional edge highlight — bright on the top & left edges,
+    /// weaker on the bottom & right (matches the raised-button light
+    /// source from above-left).
     fn draw_edge_highlight(&self, img: &mut RgbaImage) {
         let w = self.edge_highlight_width;
         let opacity = self.edge_highlight_opacity;
@@ -802,12 +802,14 @@ impl IconCanvas {
         let r = self.corner_radius;
         for py in 0..CANVAS_SIZE {
             for px in 0..CANVAS_SIZE {
-                // Signed distance to the rounded-rect edge (negative = inside).
                 let d = Self::rounded_rect_sdf(px as f32 + 0.5, py as f32 + 0.5, 0.0, 0.0, size, size, r);
                 if d <= 0.0 && d >= -w {
-                    // Stronger at the very edge, fading inward.
                     let t = (-d / w).clamp(0.0, 1.0);
-                    let a = t * opacity;
+                    // Directional: fade toward bottom-right.
+                    let nx = px as f32 / size;
+                    let ny = py as f32 / size;
+                    let dir = ((1.0 - nx) + (1.0 - ny)) / 2.0;
+                    let a = t * dir * opacity;
                     if a > 0.01 {
                         Self::blend_pixel(img, px, py, Rgba([255, 255, 255, (a * 255.0) as u8]));
                     }
@@ -830,33 +832,35 @@ impl IconCanvas {
     }
 
     /// Glossy specular highlight: a bright sheen that is strongest at the
-    /// top and fades to zero over ~40 % of the canvas height.
+    /// top-left and fades diagonally toward the bottom-right — the light
+    /// source sits above-left, matching the raised-button depth shadow.
     fn draw_specular(&self, img: &mut RgbaImage) {
         let opacity = self.specular_opacity;
         let size = CANVAS_SIZE as f32;
         let r = self.corner_radius;
         let band = size * 0.42;
         for py in 0..CANVAS_SIZE {
-            // Vertical fade: 1 at top, 0 at `band` px from top.
-            let t = 1.0 - (py as f32 / band);
-            let fade = t.clamp(0.0, 1.0);
-            // Gaussian-ish ease for a natural light curve
-            let fade = fade * fade;
-            let a = fade * opacity;
-            if a < 0.01 { continue; }
-            let alpha = (a * 255.0) as u8;
+            let fade_y = 1.0 - (py as f32 / band);
+            let fy = fade_y.clamp(0.0, 1.0);
             for px in 0..CANVAS_SIZE {
+                let fade_x = 1.0 - (px as f32 / band);
+                let fx = fade_x.clamp(0.0, 1.0);
+                // Diagonal: strongest at top-left, falls off both ways.
+                let fade = ((fy + fx) / 2.0).max(0.0);
+                let a = fade * fade * opacity;
+                if a < 0.01 { continue; }
                 if !Self::is_in_rounded_rect(px as f32, py as f32, 0.0, 0.0, size, size, r) {
                     continue;
                 }
-                Self::blend_pixel(img, px, py, Rgba([255, 255, 255, alpha]));
+                Self::blend_pixel(img, px, py, Rgba([255, 255, 255, (a * 255.0) as u8]));
             }
         }
     }
 
-    /// Inset depth: darken the edges so the tile looks like a raised glass
-    /// bevel. Uses the rounded-rect SDF — the closer to the edge the
-    /// stronger the darkening, with Gaussian falloff over `blur` px.
+    /// Raised-button depth: directional inner shadow that intensifies
+    /// toward the bottom-right corner (light source from top-left).
+    /// Uses the rounded-rect SDF for the edge distance, modulated by a
+    /// directional factor so only the bottom-right band darkens.
     fn draw_inner_depth(&self, img: &mut RgbaImage) {
         let blur = self.inner_depth_blur;
         let opacity = self.inner_depth_opacity;
@@ -864,11 +868,16 @@ impl IconCanvas {
         let r = self.corner_radius;
         for py in 0..CANVAS_SIZE {
             for px in 0..CANVAS_SIZE {
-                let d = Self::rounded_rect_sdf(px as f32 + 0.5, py as f32 + 0.5, 0.0, 0.0, size, size, r);
-                // d < 0 → inside.  At edge d ≈ 0, deeper inside → more negative.
-                if d >= 0.0 || d < -blur { continue; }
-                let t = (-d / blur).clamp(0.0, 1.0);
-                let a = (1.0 - t * t) * opacity;
+                let px_f = px as f32 + 0.5;
+                let py_f = py as f32 + 0.5;
+                let d = Self::rounded_rect_sdf(px_f, py_f, 0.0, 0.0, size, size, r);
+                if d >= 0.0 { continue; }
+                let dist_from_edge = -d;
+                if dist_from_edge > blur { continue; }
+                // Directional: 0 at top-left, 1 at bottom-right.
+                let dir = (px_f / size + py_f / size) * 0.5;
+                let t = (dist_from_edge / blur).clamp(0.0, 1.0);
+                let a = (1.0 - t) * dir * opacity;
                 if a < 0.01 { continue; }
                 Self::blend_pixel(img, px, py, Rgba([0, 0, 0, (a * 255.0) as u8]));
             }
