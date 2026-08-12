@@ -1,0 +1,17 @@
+[package]
+name = "CoreIcon"
+version = "26.1.0"
+edition = "2021"
+authors = ["arlomu"]
+description = "Icon library & generator for TontooOS – SF Symbols with Color, Gradient, Transparency and PNG generation"
+license = "MIT"
+repository = "https://github.com/TontooOS/CoreIcon"
+keywords = ["tontoo", "icons", "sf-symbols", "generator", "png"]
+categories = ["gui", "icons", "graphics"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+image = "0.25"
+ab_glyph = "0.2"
+
+[dev-dependencies]
