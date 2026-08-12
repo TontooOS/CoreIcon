@@ -6,24 +6,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let icon = IconCanvas::new()
         .corner_radius(256.0)
-        // Liquid Glass post-processing
-        .frosted(0.18)
-        .specular(0.30)
-        .inner_depth(40.0, 0.35)
-        .edge_highlight(8.0, 0.45)
-        // Background: extremely pale mint — almost white, vertical gradient
+        // 3D raised-button depth (no frosted — the background is already pale)
+        .specular(0.0)
+        .inner_depth(50.0, 0.28)
+        .edge_highlight(0.0, 0.0)
+        // Background: clearly GREEN mint — saturated enough to contrast
+        // with the white bubble, not washed out
         .background(Background::gradient(
             Gradient::new(
                 GradientDirection::TopToBottom,
                 vec![
-                    GradientStop::new(Color::from_hex("#F4FBF4").unwrap(), 0.0),
-                    GradientStop::new(Color::from_hex("#E8F5E8").unwrap(), 0.4),
-                    GradientStop::new(Color::from_hex("#DCF0DC").unwrap(), 0.8),
-                    GradientStop::new(Color::from_hex("#D0EBD0").unwrap(), 1.0),
+                    GradientStop::new(Color::from_hex("#7CD07C").unwrap(), 0.0),
+                    GradientStop::new(Color::from_hex("#5CC45C").unwrap(), 0.35),
+                    GradientStop::new(Color::from_hex("#44B444").unwrap(), 0.7),
+                    GradientStop::new(Color::from_hex("#30A030").unwrap(), 1.0),
                 ],
             )
         ))
-        // Subtle bottom shadow (very light)
+        // Subtle bottom gradient darkening
         .layer(
             Layer::new(LayerContent::rect(1024.0, 120.0, 0.0))
                 .position(0.0, 904.0)
@@ -37,7 +37,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     )
                 )
         )
-        // Speech bubble: pure white, soft subtle glow
+        // Speech bubble: pure white with soft shadow
         .layer(
             Layer::new(LayerContent::icon(MESSAGE_FILL))
                 .position(162.0, 202.0)

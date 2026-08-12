@@ -793,8 +793,7 @@ impl IconCanvas {
     }
 
     /// Directional edge highlight — bright on the top & left edges,
-    /// weaker on the bottom & right (matches the raised-button light
-    /// source from above-left).
+    /// fades to zero toward the bottom. Light from above.
     fn draw_edge_highlight(&self, img: &mut RgbaImage) {
         let w = self.edge_highlight_width;
         let opacity = self.edge_highlight_opacity;
@@ -805,10 +804,8 @@ impl IconCanvas {
                 let d = Self::rounded_rect_sdf(px as f32 + 0.5, py as f32 + 0.5, 0.0, 0.0, size, size, r);
                 if d <= 0.0 && d >= -w {
                     let t = (-d / w).clamp(0.0, 1.0);
-                    // Directional: fade toward bottom-right.
-                    let nx = px as f32 / size;
                     let ny = py as f32 / size;
-                    let dir = ((1.0 - nx) + (1.0 - ny)) / 2.0;
+                    let dir = 1.0 - ny;
                     let a = t * dir * opacity;
                     if a > 0.01 {
                         Self::blend_pixel(img, px, py, Rgba([255, 255, 255, (a * 255.0) as u8]));
@@ -831,27 +828,29 @@ impl IconCanvas {
         }
     }
 
-    /// Glossy specular highlight: a bright sheen that is strongest at the
-    /// top-left and fades diagonally toward the bottom-right — the light
-    /// source sits above-left, matching the raised-button depth shadow.
+    /// Glossy specular highlight: a bright rim along the top & left edges
+    /// that fades sharply inward — light source from above-left.
+    /// Only the very edge band gets the sheen, not the whole canvas.
     fn draw_specular(&self, img: &mut RgbaImage) {
         let opacity = self.specular_opacity;
         let size = CANVAS_SIZE as f32;
         let r = self.corner_radius;
-        let band = size * 0.42;
+        let band = size * 0.035;
         for py in 0..CANVAS_SIZE {
-            let fade_y = 1.0 - (py as f32 / band);
-            let fy = fade_y.clamp(0.0, 1.0);
             for px in 0..CANVAS_SIZE {
-                let fade_x = 1.0 - (px as f32 / band);
-                let fx = fade_x.clamp(0.0, 1.0);
-                // Diagonal: strongest at top-left, falls off both ways.
-                let fade = ((fy + fx) / 2.0).max(0.0);
-                let a = fade * fade * opacity;
-                if a < 0.01 { continue; }
                 if !Self::is_in_rounded_rect(px as f32, py as f32, 0.0, 0.0, size, size, r) {
                     continue;
                 }
+                let d = Self::rounded_rect_sdf(px as f32 + 0.5, py as f32 + 0.5, 0.0, 0.0, size, size, r);
+                if d >= 0.0 { continue; }
+                let dist_from_edge = -d;
+                if dist_from_edge > band { continue; }
+                let edge_t = 1.0 - (dist_from_edge / band);
+                let edge_fade = edge_t * edge_t;
+                let ny = py as f32 / size;
+                let dir = 1.0 - ny;
+                let a = edge_fade * dir * opacity;
+                if a < 0.01 { continue; }
                 Self::blend_pixel(img, px, py, Rgba([255, 255, 255, (a * 255.0) as u8]));
             }
         }
