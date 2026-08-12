@@ -1,5 +1,8 @@
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [package]
-name = "CoreIcon"
+name = "coreicon"
 version = "26.1.0"
 edition = "2021"
 authors = ["arlomu"]
