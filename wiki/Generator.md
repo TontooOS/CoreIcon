@@ -253,6 +253,276 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+## Add Depth to Existing Images
+
+Two static methods on `IconCanvas` let you apply depth effects to any existing
+image file (JPG, PNG, etc.) without building layers manually.
+
+### `add_depth_to_image`
+
+```rust
+pub fn add_depth_to_image(
+    input_path: impl AsRef<Path>,
+    corner_radius: f32,
+    shadow_offset_x: Option<f32>,
+    shadow_offset_y: Option<f32>,
+    shadow_blur: Option<f32>,
+    shadow_opacity: Option<f32>,
+    inner_depth_blur: Option<f32>,
+    inner_depth_opacity: Option<f32>,
+    specular_opacity: Option<f32>,
+    edge_highlight_width: Option<f32>,
+    edge_highlight_opacity: Option<f32>,
+) -> Result<RgbaImage, Box<dyn std::error::Error>>
+```
+
+Loads the source image, resizes it to fit the 1024x1024 canvas (centered),
+then applies all requested depth effects. Returns the processed `RgbaImage`.
+
+Parameters:
+
+| Parameter | Description |
+|---|---|
+| `input_path` | Path to the source image (any format supported by the `image` crate) |
+| `corner_radius` | Round the canvas edges; `0` = square, `220` = iOS-style icon |
+| `shadow_offset_x` | Horizontal shadow shift in pixels |
+| `shadow_offset_y` | Vertical shadow shift in pixels |
+| `shadow_blur` | Shadow blur radius in pixels |
+| `shadow_opacity` | Shadow strength, `0.0`–`1.0` |
+| `inner_depth_blur` | Inner bevel blur radius; `0` to disable |
+| `inner_depth_opacity` | Inner bevel strength, `0.0`–`1.0` |
+| `specular_opacity` | Glossy highlight strength, `0.0`–`1.0` |
+| `edge_highlight_width` | Edge highlight thickness in pixels; `0` to disable |
+| `edge_highlight_opacity` | Edge highlight strength, `0.0`–`1.0` |
+
+Pass `None` for any effect you want to skip.
+
+### `add_depth_to_image_and_save`
+
+```rust
+pub fn add_depth_to_image_and_save(
+    input_path: impl AsRef<Path>,
+    output_path: impl AsRef<Path>,
+    corner_radius: f32,
+    shadow_offset_x: Option<f32>,
+    shadow_offset_y: Option<f32>,
+    shadow_blur: Option<f32>,
+    shadow_opacity: Option<f32>,
+    inner_depth_blur: Option<f32>,
+    inner_depth_opacity: Option<f32>,
+    specular_opacity: Option<f32>,
+    edge_highlight_width: Option<f32>,
+    edge_highlight_opacity: Option<f32>,
+) -> Result<(), Box<dyn std::error::Error>>
+```
+
+Convenience wrapper that calls `add_depth_to_image` and saves the result.
+
+### Example: Add Depth to an Existing Icon
+
+```rust
+use CoreIcon::generator::IconCanvas;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Convert JPG to PNG and apply depth in one go
+    let result = IconCanvas::add_depth_to_image(
+        "my-app-icon.jpg",
+        220.0,              // corner_radius
+        Some(0.0),          // shadow_offset_x
+        Some(10.0),         // shadow_offset_y
+        Some(20.0),         // shadow_blur
+        Some(0.35),         // shadow_opacity
+        Some(14.0),         // inner_depth_blur
+        Some(0.3),          // inner_depth_opacity
+        Some(0.18),         // specular_opacity
+        Some(5.0),          // edge_highlight_width
+        Some(0.25),         // edge_highlight_opacity
+    )?;
+    result.save("my-app-icon-depth.png")?;
+    Ok(())
+}
+```
+
+## Change Color
+
+Tint an existing icon to a target color with configurable intensity, then
+apply depth effects. The depth effects (shadow, specular, inner depth,
+edge highlight) keep their original colors and are not tinted.
+
+### `change_color`
+
+```rust
+pub fn change_color(
+    input_path: impl AsRef<Path>,
+    tint_color: Color,
+    intensity: f32,
+    corner_radius: f32,
+    shadow_offset_x: Option<f32>,
+    shadow_offset_y: Option<f32>,
+    shadow_blur: Option<f32>,
+    shadow_opacity: Option<f32>,
+    inner_depth_blur: Option<f32>,
+    inner_depth_opacity: Option<f32>,
+    specular_opacity: Option<f32>,
+    edge_highlight_width: Option<f32>,
+    edge_highlight_opacity: Option<f32>,
+) -> Result<RgbaImage, Box<dyn std::error::Error>>
+```
+
+Loads the source image, blends each pixel toward `tint_color` based on
+`intensity`, then applies depth effects on top. Returns the processed
+`RgbaImage`.
+
+Parameters:
+
+| Parameter | Description |
+|---|---|
+| `input_path` | Path to the source image |
+| `tint_color` | Target color to blend toward |
+| `intensity` | Blend factor, `0.0` = original, `1.0` = fully tinted |
+| `corner_radius` | Round the canvas edges; `0` = square |
+| `shadow_offset_x` | Horizontal shadow shift in pixels |
+| `shadow_offset_y` | Vertical shadow shift in pixels |
+| `shadow_blur` | Shadow blur radius in pixels |
+| `shadow_opacity` | Shadow strength, `0.0`–`1.0` |
+| `inner_depth_blur` | Inner bevel blur radius; `0` to disable |
+| `inner_depth_opacity` | Inner bevel strength, `0.0`–`1.0` |
+| `specular_opacity` | Glossy highlight strength, `0.0`–`1.0` |
+| `edge_highlight_width` | Edge highlight thickness in pixels; `0` to disable |
+| `edge_highlight_opacity` | Edge highlight strength, `0.0`–`1.0` |
+
+### `change_color_and_save`
+
+```rust
+pub fn change_color_and_save(
+    input_path: impl AsRef<Path>,
+    output_path: impl AsRef<Path>,
+    tint_color: Color,
+    intensity: f32,
+    corner_radius: f32,
+    shadow_offset_x: Option<f32>,
+    shadow_offset_y: Option<f32>,
+    shadow_blur: Option<f32>,
+    shadow_opacity: Option<f32>,
+    inner_depth_blur: Option<f32>,
+    inner_depth_opacity: Option<f32>,
+    specular_opacity: Option<f32>,
+    edge_highlight_width: Option<f32>,
+    edge_highlight_opacity: Option<f32>,
+) -> Result<(), Box<dyn std::error::Error>>
+```
+
+Convenience wrapper that calls `change_color` and saves the result.
+
+### Example: Tint an Icon to Orange
+
+```rust
+use CoreIcon::generator::IconCanvas;
+use CoreIcon::Color;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let orange = Color::from_hex("#FF6B2B").unwrap();
+    let result = IconCanvas::change_color(
+        "my-icon.png",
+        orange,             // tint to TontooOS orange
+        0.8,                // 80% intensity
+        220.0,              // corner_radius
+        Some(0.0),          // shadow_offset_x
+        Some(10.0),         // shadow_offset_y
+        Some(20.0),         // shadow_blur
+        Some(0.35),         // shadow_opacity
+        Some(14.0),         // inner_depth_blur
+        Some(0.3),          // inner_depth_opacity
+        Some(0.18),         // specular_opacity
+        Some(5.0),          // edge_highlight_width
+        Some(0.25),         // edge_highlight_opacity
+    )?;
+    result.save("orange-icon.png")?;
+    Ok(())
+}
+```
+
+## Dark / Light Mode
+
+Switch an icon between dark and light mode by detecting the background color
+and replacing it. The foreground (logo, text, icons) stays unchanged.
+
+### `IconMode`
+
+```rust
+pub enum IconMode {
+    Dark,   // background -> black
+    Light,  // background -> white
+}
+```
+
+### `dark_light_mode`
+
+```rust
+pub fn dark_light_mode(
+    input_path: impl AsRef<Path>,
+    mode: IconMode,
+    corner_radius: f32,
+    shadow_offset_x: Option<f32>,
+    shadow_offset_y: Option<f32>,
+    shadow_blur: Option<f32>,
+    shadow_opacity: Option<f32>,
+    inner_depth_blur: Option<f32>,
+    inner_depth_opacity: Option<f32>,
+    specular_opacity: Option<f32>,
+    edge_highlight_width: Option<f32>,
+    edge_highlight_opacity: Option<f32>,
+) -> Result<RgbaImage, Box<dyn std::error::Error>>
+```
+
+Loads the source image, samples the edge color to detect the background, then
+replaces all pixels close to that color with black (`Dark`) or white (`Light`).
+Foreground pixels are kept as-is. Depth effects are applied on top.
+
+The `tolerance` for background detection is `0.18` (Euclidean distance in RGB).
+
+### `dark_light_mode_and_save`
+
+```rust
+pub fn dark_light_mode_and_save(
+    input_path: impl AsRef<Path>,
+    output_path: impl AsRef<Path>,
+    mode: IconMode,
+    corner_radius: f32,
+    shadow_offset_x: Option<f32>,
+    shadow_offset_y: Option<f32>,
+    shadow_blur: Option<f32>,
+    shadow_opacity: Option<f32>,
+    inner_depth_blur: Option<f32>,
+    inner_depth_opacity: Option<f32>,
+    specular_opacity: Option<f32>,
+    edge_highlight_width: Option<f32>,
+    edge_highlight_opacity: Option<f32>,
+) -> Result<(), Box<dyn std::error::Error>>
+```
+
+Convenience wrapper that calls `dark_light_mode` and saves the result.
+
+### Example: VS Code Dark Mode
+
+```rust
+use CoreIcon::generator::{IconCanvas, IconMode};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let result = IconCanvas::dark_light_mode(
+        "vscode-icon.png",
+        IconMode::Dark,
+        220.0,
+        Some(0.0), Some(10.0), Some(20.0), Some(0.35),
+        Some(14.0), Some(0.3),
+        Some(0.18),
+        Some(5.0), Some(0.25),
+    )?;
+    result.save("vscode-dark.png")?;
+    Ok(())
+}
+```
+
 ## Cross References
 
 - [SFSymbol.md](SFSymbol.md) – symbol constants rendered via `LayerContent::Icon`

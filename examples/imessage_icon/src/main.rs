@@ -7,9 +7,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let icon = IconCanvas::new()
         .corner_radius(256.0)
         // 3D raised-button depth (no frosted — the background is already pale)
-        .specular(0.0)
+        .specular(0.30)
         .inner_depth(50.0, 0.28)
-        .edge_highlight(0.0, 0.0)
+        .edge_highlight(5.0, 0.40)
         // Background: clearly GREEN mint — saturated enough to contrast
         // with the white bubble, not washed out
         .background(Background::gradient(

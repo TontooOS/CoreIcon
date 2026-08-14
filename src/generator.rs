@@ -10,6 +10,15 @@ pub const CANVAS_SIZE: u32 = 1024;
 /// Set this to the path of the `assets/icons/` folder at runtime.
 pub static mut ASSETS_DIR: &str = "assets/icons";
 
+/// Icon color mode for `dark_light_mode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IconMode {
+    /// Make background dark (black), keep foreground as-is.
+    Dark,
+    /// Make background light (white), keep foreground as-is.
+    Light,
+}
+
 // ═══════════════════════════════════════════════════════════════
 // Shadow
 // ═══════════════════════════════════════════════════════════════
@@ -235,6 +244,625 @@ impl IconCanvas {
         let img = self.render();
         img.save(path.as_ref())?;
         Ok(())
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // add_depth — apply depth effects to an existing image
+    // ═══════════════════════════════════════════════════════════════
+
+    /// Load an existing image and apply depth effects (shadow, inner depth,
+    /// specular highlight, edge highlight, corner radius).
+    ///
+    /// Returns the processed `RgbaImage`.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use CoreIcon::generator::IconCanvas;
+    ///
+    /// let result = IconCanvas::add_depth_to_image(
+    ///     "my-icon.png",
+    ///     220.0, // corner_radius
+    ///     Some(0.0),   // shadow_offset_x
+    ///     Some(10.0),  // shadow_offset_y
+    ///     Some(20.0),  // shadow_blur
+    ///     Some(0.3),   // shadow_opacity
+    ///     Some(12.0),  // inner_depth_blur
+    ///     Some(0.25),  // inner_depth_opacity
+    ///     Some(0.15),  // specular_opacity
+    ///     Some(4.0),   // edge_highlight_width
+    ///     Some(0.2),   // edge_highlight_opacity
+    /// );
+    /// result.unwrap().save("output.png").unwrap();
+    /// ```
+    pub fn add_depth_to_image(
+        input_path: impl AsRef<Path>,
+        corner_radius: f32,
+        shadow_offset_x: Option<f32>,
+        shadow_offset_y: Option<f32>,
+        shadow_blur: Option<f32>,
+        shadow_opacity: Option<f32>,
+        inner_depth_blur: Option<f32>,
+        inner_depth_opacity: Option<f32>,
+        specular_opacity: Option<f32>,
+        edge_highlight_width: Option<f32>,
+        edge_highlight_opacity: Option<f32>,
+    ) -> Result<RgbaImage, Box<dyn std::error::Error>> {
+        let src = image::open(input_path)?;
+        let src = src.resize(CANVAS_SIZE, CANVAS_SIZE, image::imageops::FilterType::Lanczos3);
+
+        let mut canvas = RgbaImage::from_pixel(CANVAS_SIZE, CANVAS_SIZE, Rgba([0, 0, 0, 0]));
+
+        let sw = src.width();
+        let sh = src.height();
+        let ox = (CANVAS_SIZE - sw) / 2;
+        let oy = (CANVAS_SIZE - sh) / 2;
+        let rgba = src.to_rgba8();
+
+        // 1. Draw shadow FIRST (so it appears behind the image)
+        if let Some(sy) = shadow_offset_y {
+            let sx = shadow_offset_x.unwrap_or(0.0);
+            let blur = shadow_blur.unwrap_or(16.0);
+            let opacity = shadow_opacity.unwrap_or(0.3);
+            let shadow_color = Color::new(0.0, 0.0, 0.0, opacity);
+            Self::draw_shadow_for_content(&mut canvas, &rgba, ox, oy, sx, sy, blur, shadow_color);
+        }
+
+        // 2. Draw the source image ON TOP of the shadow
+        for (px, py, pixel) in rgba.enumerate_pixels() {
+            canvas.put_pixel(ox + px, oy + py, *pixel);
+        }
+
+        // Specular highlight (glossy rim)
+        if let Some(op) = specular_opacity {
+            if op > 0.0 && corner_radius > 0.0 {
+                Self::draw_specular_static(&mut canvas, corner_radius, op);
+            }
+        }
+
+        // Inner depth (directional bevel)
+        if let Some(blur) = inner_depth_blur {
+            let opacity = inner_depth_opacity.unwrap_or(0.25);
+            if blur > 0.0 && opacity > 0.0 && corner_radius > 0.0 {
+                Self::draw_inner_depth_static(&mut canvas, corner_radius, blur, opacity);
+            }
+        }
+
+        // Edge highlight
+        if let Some(w) = edge_highlight_width {
+            let opacity = edge_highlight_opacity.unwrap_or(0.2);
+            if w > 0.0 && corner_radius > 0.0 {
+                Self::draw_edge_highlight_static(&mut canvas, corner_radius, w, opacity);
+            }
+        }
+
+        // Corner radius mask
+        if corner_radius > 0.0 {
+            Self::apply_corner_radius_static(&mut canvas, corner_radius);
+        }
+
+        Ok(canvas)
+    }
+
+    /// Convenience: load image, apply depth, save to output path.
+    pub fn add_depth_to_image_and_save(
+        input_path: impl AsRef<Path>,
+        output_path: impl AsRef<Path>,
+        corner_radius: f32,
+        shadow_offset_x: Option<f32>,
+        shadow_offset_y: Option<f32>,
+        shadow_blur: Option<f32>,
+        shadow_opacity: Option<f32>,
+        inner_depth_blur: Option<f32>,
+        inner_depth_opacity: Option<f32>,
+        specular_opacity: Option<f32>,
+        edge_highlight_width: Option<f32>,
+        edge_highlight_opacity: Option<f32>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let img = Self::add_depth_to_image(
+            input_path, corner_radius,
+            shadow_offset_x, shadow_offset_y, shadow_blur, shadow_opacity,
+            inner_depth_blur, inner_depth_opacity,
+            specular_opacity,
+            edge_highlight_width, edge_highlight_opacity,
+        )?;
+        img.save(output_path.as_ref())?;
+        Ok(())
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // change_color — tint an existing icon to a target color
+    // ═══════════════════════════════════════════════════════════════
+
+    /// Tint an existing icon to a target color with configurable intensity,
+    /// then apply depth effects. The depth effects (shadow, specular,
+    /// inner depth, edge highlight) keep their original colors.
+    ///
+    /// - `intensity`: `0.0` = original colors, `1.0` = fully tinted
+    /// - `tint_color`: the target color to blend toward
+    ///
+    /// # Example
+    /// ```no_run
+    /// use CoreIcon::generator::IconCanvas;
+    /// use CoreIcon::Color;
+    ///
+    /// let result = IconCanvas::change_color(
+    ///     "my-icon.png",
+    ///     Color::from_hex("#FF6B2B").unwrap(), // tint to orange
+    ///     0.7,                                  // 70% intensity
+    ///     220.0,                                // corner_radius
+    ///     Some(0.0),   Some(8.0),  Some(12.0), Some(0.3),
+    ///     Some(10.0),  Some(0.25),
+    ///     Some(0.15),
+    ///     Some(4.0),   Some(0.2),
+    /// );
+    /// result.unwrap().save("orange-icon.png").unwrap();
+    /// ```
+    pub fn change_color(
+        input_path: impl AsRef<Path>,
+        tint_color: Color,
+        intensity: f32,
+        corner_radius: f32,
+        shadow_offset_x: Option<f32>,
+        shadow_offset_y: Option<f32>,
+        shadow_blur: Option<f32>,
+        shadow_opacity: Option<f32>,
+        inner_depth_blur: Option<f32>,
+        inner_depth_opacity: Option<f32>,
+        specular_opacity: Option<f32>,
+        edge_highlight_width: Option<f32>,
+        edge_highlight_opacity: Option<f32>,
+    ) -> Result<RgbaImage, Box<dyn std::error::Error>> {
+        let src = image::open(input_path)?;
+        let src = src.resize(CANVAS_SIZE, CANVAS_SIZE, image::imageops::FilterType::Lanczos3);
+
+        let mut canvas = RgbaImage::from_pixel(CANVAS_SIZE, CANVAS_SIZE, Rgba([0, 0, 0, 0]));
+
+        let sw = src.width();
+        let sh = src.height();
+        let ox = (CANVAS_SIZE - sw) / 2;
+        let oy = (CANVAS_SIZE - sh) / 2;
+        let rgba = src.to_rgba8();
+
+        // HSL-based colorize: preserve lightness, swap hue + saturation
+        let intensity = intensity.clamp(0.0, 1.0);
+        let (tgt_h, tgt_s, _) = Self::rgb_to_hsl(tint_color.r, tint_color.g, tint_color.b);
+        let mut tinted = RgbaImage::from_pixel(CANVAS_SIZE, CANVAS_SIZE, Rgba([0, 0, 0, 0]));
+        for (px, py, pixel) in rgba.enumerate_pixels() {
+            let a = pixel[3] as f32 / 255.0;
+            if a < 0.01 { continue; }
+            let r = pixel[0] as f32 / 255.0;
+            let g = pixel[1] as f32 / 255.0;
+            let b = pixel[2] as f32 / 255.0;
+            let (h, s, l) = Self::rgb_to_hsl(r, g, b);
+
+            // Only colorize pixels with meaningful saturation
+            // Near-neutral (gray/white/black) pixels keep their original color
+            let (new_h, new_s) = if s > 0.05 {
+                (tgt_h, tgt_s)
+            } else {
+                (h, s)
+            };
+
+            let (nr, ng, nb) = Self::hsl_to_rgb(new_h, new_s, l);
+
+            // Blend between original and colorized based on intensity
+            let fr = r + (nr - r) * intensity;
+            let fg = g + (ng - g) * intensity;
+            let fb = b + (nb - b) * intensity;
+
+            tinted.put_pixel(px, py, Rgba([
+                (fr * 255.0) as u8,
+                (fg * 255.0) as u8,
+                (fb * 255.0) as u8,
+                (a * 255.0) as u8,
+            ]));
+        }
+
+        // 1. Draw shadow FIRST (so it appears behind the image)
+        if let Some(sy) = shadow_offset_y {
+            let sx = shadow_offset_x.unwrap_or(0.0);
+            let blur = shadow_blur.unwrap_or(16.0);
+            let opacity = shadow_opacity.unwrap_or(0.3);
+            let shadow_color = Color::new(0.0, 0.0, 0.0, opacity);
+            Self::draw_shadow_for_content(&mut canvas, &tinted, ox, oy, sx, sy, blur, shadow_color);
+        }
+
+        // 2. Draw the tinted image ON TOP of the shadow
+        for (px, py, pixel) in tinted.enumerate_pixels() {
+            canvas.put_pixel(ox + px, oy + py, *pixel);
+        }
+
+        // Specular highlight (glossy rim) — NOT tinted
+        if let Some(op) = specular_opacity {
+            if op > 0.0 && corner_radius > 0.0 {
+                Self::draw_specular_static(&mut canvas, corner_radius, op);
+            }
+        }
+
+        // Inner depth — NOT tinted
+        if let Some(blur) = inner_depth_blur {
+            let opacity = inner_depth_opacity.unwrap_or(0.25);
+            if blur > 0.0 && opacity > 0.0 && corner_radius > 0.0 {
+                Self::draw_inner_depth_static(&mut canvas, corner_radius, blur, opacity);
+            }
+        }
+
+        // Edge highlight — NOT tinted
+        if let Some(w) = edge_highlight_width {
+            let opacity = edge_highlight_opacity.unwrap_or(0.2);
+            if w > 0.0 && corner_radius > 0.0 {
+                Self::draw_edge_highlight_static(&mut canvas, corner_radius, w, opacity);
+            }
+        }
+
+        // Corner radius mask
+        if corner_radius > 0.0 {
+            Self::apply_corner_radius_static(&mut canvas, corner_radius);
+        }
+
+        Ok(canvas)
+    }
+
+    /// Convenience: tint an icon and save to output path.
+    pub fn change_color_and_save(
+        input_path: impl AsRef<Path>,
+        output_path: impl AsRef<Path>,
+        tint_color: Color,
+        intensity: f32,
+        corner_radius: f32,
+        shadow_offset_x: Option<f32>,
+        shadow_offset_y: Option<f32>,
+        shadow_blur: Option<f32>,
+        shadow_opacity: Option<f32>,
+        inner_depth_blur: Option<f32>,
+        inner_depth_opacity: Option<f32>,
+        specular_opacity: Option<f32>,
+        edge_highlight_width: Option<f32>,
+        edge_highlight_opacity: Option<f32>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let img = Self::change_color(
+            input_path, tint_color, intensity, corner_radius,
+            shadow_offset_x, shadow_offset_y, shadow_blur, shadow_opacity,
+            inner_depth_blur, inner_depth_opacity,
+            specular_opacity,
+            edge_highlight_width, edge_highlight_opacity,
+        )?;
+        img.save(output_path.as_ref())?;
+        Ok(())
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // dark_light_mode — switch icon background between dark/light
+    // ═══════════════════════════════════════════════════════════════
+
+    /// Switch an icon between dark and light mode by detecting the
+    /// background color and replacing it.
+    ///
+    /// - `Dark`: background becomes black, foreground unchanged
+    /// - `Light`: background becomes white, foreground unchanged
+    ///
+    /// Depth effects are applied on top (untinted).
+    pub fn dark_light_mode(
+        input_path: impl AsRef<Path>,
+        mode: IconMode,
+        corner_radius: f32,
+        shadow_offset_x: Option<f32>,
+        shadow_offset_y: Option<f32>,
+        shadow_blur: Option<f32>,
+        shadow_opacity: Option<f32>,
+        inner_depth_blur: Option<f32>,
+        inner_depth_opacity: Option<f32>,
+        specular_opacity: Option<f32>,
+        edge_highlight_width: Option<f32>,
+        edge_highlight_opacity: Option<f32>,
+    ) -> Result<RgbaImage, Box<dyn std::error::Error>> {
+        let src = image::open(input_path)?;
+        let src = src.resize(CANVAS_SIZE, CANVAS_SIZE, image::imageops::FilterType::Lanczos3);
+
+        let mut canvas = RgbaImage::from_pixel(CANVAS_SIZE, CANVAS_SIZE, Rgba([0, 0, 0, 0]));
+
+        let sw = src.width();
+        let sh = src.height();
+        let ox = (CANVAS_SIZE - sw) / 2;
+        let oy = (CANVAS_SIZE - sh) / 2;
+        let rgba = src.to_rgba8();
+
+        // Target color for background replacement
+        let (target_r, target_g, target_b) = match mode {
+            IconMode::Dark => (0.13, 0.13, 0.15),
+            IconMode::Light => (1.0, 1.0, 1.0),
+        };
+
+        // Flood-fill background detection from edges
+        let w = rgba.width() as usize;
+        let h = rgba.height() as usize;
+        let mut is_bg = vec![false; w * h];
+        let mut queue: std::collections::VecDeque<(usize, usize)> = std::collections::VecDeque::new();
+
+        // Seed: all edge pixels
+        for x in 0..w {
+            queue.push_back((x, 0));
+            queue.push_back((x, h - 1));
+        }
+        for y in 1..h - 1 {
+            queue.push_back((0, y));
+            queue.push_back((w - 1, y));
+        }
+
+        let color_at = |x: usize, y: usize| -> (f32, f32, f32) {
+            let p = rgba.get_pixel(x as u32, y as u32);
+            (p[0] as f32 / 255.0, p[1] as f32 / 255.0, p[2] as f32 / 255.0)
+        };
+
+        let threshold = 0.22;
+
+        while let Some((x, y)) = queue.pop_front() {
+            let idx = y * w + x;
+            if is_bg[idx] { continue; }
+
+            let (cr, cg, cb) = color_at(x, y);
+            is_bg[idx] = true;
+
+            // Check 4-connected neighbors
+            let neighbors: [(isize, isize); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
+            for (dx, dy) in neighbors {
+                let nx = x as isize + dx;
+                let ny = y as isize + dy;
+                if nx < 0 || ny < 0 || nx >= w as isize || ny >= h as isize { continue; }
+                let nx = nx as usize;
+                let ny = ny as usize;
+                let nidx = ny * w + nx;
+                if is_bg[nidx] { continue; }
+
+                let (nr, ng, nb) = color_at(nx, ny);
+                let dr = cr - nr;
+                let dg = cg - ng;
+                let db = cb - nb;
+                let dist = (dr * dr + dg * dg + db * db).sqrt();
+                if dist < threshold {
+                    queue.push_back((nx, ny));
+                }
+            }
+        }
+
+        let mut processed = RgbaImage::from_pixel(CANVAS_SIZE, CANVAS_SIZE, Rgba([0, 0, 0, 0]));
+        for (px, py, pixel) in rgba.enumerate_pixels() {
+            let a = pixel[3] as f32 / 255.0;
+            if a < 0.01 { continue; }
+            let idx = py as usize * w + px as usize;
+            let (nr, ng, nb) = if is_bg[idx] {
+                (target_r, target_g, target_b)
+            } else {
+                (pixel[0] as f32 / 255.0, pixel[1] as f32 / 255.0, pixel[2] as f32 / 255.0)
+            };
+            processed.put_pixel(px, py, Rgba([
+                (nr * 255.0) as u8,
+                (ng * 255.0) as u8,
+                (nb * 255.0) as u8,
+                (a * 255.0) as u8,
+            ]));
+        }
+
+        // 1. Draw shadow FIRST
+        if let Some(sy) = shadow_offset_y {
+            let sx = shadow_offset_x.unwrap_or(0.0);
+            let blur = shadow_blur.unwrap_or(16.0);
+            let opacity = shadow_opacity.unwrap_or(0.3);
+            let shadow_color = Color::new(0.0, 0.0, 0.0, opacity);
+            Self::draw_shadow_for_content(&mut canvas, &processed, ox, oy, sx, sy, blur, shadow_color);
+        }
+
+        // 2. Draw the processed image
+        for (px, py, pixel) in processed.enumerate_pixels() {
+            canvas.put_pixel(ox + px, oy + py, *pixel);
+        }
+
+        // Depth effects
+        if let Some(op) = specular_opacity {
+            if op > 0.0 && corner_radius > 0.0 {
+                Self::draw_specular_static(&mut canvas, corner_radius, op);
+            }
+        }
+        if let Some(blur) = inner_depth_blur {
+            let opacity = inner_depth_opacity.unwrap_or(0.25);
+            if blur > 0.0 && opacity > 0.0 && corner_radius > 0.0 {
+                Self::draw_inner_depth_static(&mut canvas, corner_radius, blur, opacity);
+            }
+        }
+        if let Some(w) = edge_highlight_width {
+            let opacity = edge_highlight_opacity.unwrap_or(0.2);
+            if w > 0.0 && corner_radius > 0.0 {
+                Self::draw_edge_highlight_static(&mut canvas, corner_radius, w, opacity);
+            }
+        }
+        if corner_radius > 0.0 {
+            Self::apply_corner_radius_static(&mut canvas, corner_radius);
+        }
+
+        Ok(canvas)
+    }
+
+    /// Convenience: switch icon mode and save.
+    pub fn dark_light_mode_and_save(
+        input_path: impl AsRef<Path>,
+        output_path: impl AsRef<Path>,
+        mode: IconMode,
+        corner_radius: f32,
+        shadow_offset_x: Option<f32>,
+        shadow_offset_y: Option<f32>,
+        shadow_blur: Option<f32>,
+        shadow_opacity: Option<f32>,
+        inner_depth_blur: Option<f32>,
+        inner_depth_opacity: Option<f32>,
+        specular_opacity: Option<f32>,
+        edge_highlight_width: Option<f32>,
+        edge_highlight_opacity: Option<f32>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let img = Self::dark_light_mode(
+            input_path, mode, corner_radius,
+            shadow_offset_x, shadow_offset_y, shadow_blur, shadow_opacity,
+            inner_depth_blur, inner_depth_opacity,
+            specular_opacity,
+            edge_highlight_width, edge_highlight_opacity,
+        )?;
+        img.save(output_path.as_ref())?;
+        Ok(())
+    }
+
+    /// Sample the dominant color from the edge pixels of an image.
+    /// Averages the outermost 4px border to get a clean background color.
+    fn sample_edge_color(img: &RgbaImage) -> [u8; 3] {
+        let (w, h) = (img.width(), img.height());
+        let mut r_sum: u64 = 0;
+        let mut g_sum: u64 = 0;
+        let mut b_sum: u64 = 0;
+        let mut count: u64 = 0;
+        let border = 4u32;
+
+        for x in 0..w {
+            for dy in 0..border.min(h) {
+                let p = *img.get_pixel(x, dy);
+                r_sum += p[0] as u64;
+                g_sum += p[1] as u64;
+                b_sum += p[2] as u64;
+                count += 1;
+                if h > dy + 1 {
+                    let p2 = *img.get_pixel(x, h - 1 - dy);
+                    r_sum += p2[0] as u64;
+                    g_sum += p2[1] as u64;
+                    b_sum += p2[2] as u64;
+                    count += 1;
+                }
+            }
+        }
+        for y in 0..h {
+            for dx in 0..border.min(w) {
+                let p = *img.get_pixel(dx, y);
+                r_sum += p[0] as u64;
+                g_sum += p[1] as u64;
+                b_sum += p[2] as u64;
+                count += 1;
+                if w > dx + 1 {
+                    let p2 = *img.get_pixel(w - 1 - dx, y);
+                    r_sum += p2[0] as u64;
+                    g_sum += p2[1] as u64;
+                    b_sum += p2[2] as u64;
+                    count += 1;
+                }
+            }
+        }
+
+        if count == 0 {
+            return [0, 0, 0];
+        }
+        [
+            (r_sum / count) as u8,
+            (g_sum / count) as u8,
+            (b_sum / count) as u8,
+        ]
+    }
+
+    /// Draw a shadow based on the alpha channel of the source image.
+    fn draw_shadow_for_content(
+        canvas: &mut RgbaImage,
+        src: &RgbaImage,
+        ox: u32, oy: u32,
+        offset_x: f32, offset_y: f32, blur: f32, color: Color,
+    ) {
+        let blur_px = blur as i32;
+        let sw = src.width();
+        let sh = src.height();
+        for sy in 0..sh {
+            for sx in 0..sw {
+                let pixel = src.get_pixel(sx, sy);
+                if pixel[3] < 10 { continue; }
+                let base_x = ox as i32 + sx as i32 + offset_x as i32;
+                let base_y = oy as i32 + sy as i32 + offset_y as i32;
+                // Draw blurred shadow around this pixel
+                for dy in -blur_px..=blur_px {
+                    for dx in -blur_px..=blur_px {
+                        let px = base_x + dx;
+                        let py = base_y + dy;
+                        if px < 0 || py < 0 || px >= CANVAS_SIZE as i32 || py >= CANVAS_SIZE as i32 { continue; }
+                        let dist = ((dx * dx + dy * dy) as f32).sqrt();
+                        let alpha = (1.0 - (dist / blur).min(1.0)).max(0.0) * color.a;
+                        if alpha > 0.01 {
+                            let rgba = Self::color_to_rgba(Color::new(color.r, color.g, color.b, alpha));
+                            Self::blend_pixel(canvas, px as u32, py as u32, rgba);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn draw_specular_static(img: &mut RgbaImage, r: f32, opacity: f32) {
+        let size = CANVAS_SIZE as f32;
+        let band = size * 0.035;
+        for py in 0..CANVAS_SIZE {
+            for px in 0..CANVAS_SIZE {
+                if !Self::is_in_rounded_rect(px as f32, py as f32, 0.0, 0.0, size, size, r) { continue; }
+                let d = Self::rounded_rect_sdf(px as f32 + 0.5, py as f32 + 0.5, 0.0, 0.0, size, size, r);
+                if d >= 0.0 { continue; }
+                let dist_from_edge = -d;
+                if dist_from_edge > band { continue; }
+                let edge_t = 1.0 - (dist_from_edge / band);
+                let edge_fade = edge_t * edge_t;
+                let ny = py as f32 / size;
+                let dir = 1.0 - ny;
+                let a = edge_fade * dir * opacity;
+                if a < 0.01 { continue; }
+                Self::blend_pixel(img, px, py, Rgba([255, 255, 255, (a * 255.0) as u8]));
+            }
+        }
+    }
+
+    fn draw_inner_depth_static(img: &mut RgbaImage, r: f32, blur: f32, opacity: f32) {
+        let size = CANVAS_SIZE as f32;
+        for py in 0..CANVAS_SIZE {
+            for px in 0..CANVAS_SIZE {
+                let px_f = px as f32 + 0.5;
+                let py_f = py as f32 + 0.5;
+                let d = Self::rounded_rect_sdf(px_f, py_f, 0.0, 0.0, size, size, r);
+                if d >= 0.0 { continue; }
+                let dist_from_edge = -d;
+                if dist_from_edge > blur { continue; }
+                let dir = (px_f / size + py_f / size) * 0.5;
+                let t = (dist_from_edge / blur).clamp(0.0, 1.0);
+                let a = (1.0 - t) * dir * opacity;
+                if a < 0.01 { continue; }
+                Self::blend_pixel(img, px, py, Rgba([0, 0, 0, (a * 255.0) as u8]));
+            }
+        }
+    }
+
+    fn draw_edge_highlight_static(img: &mut RgbaImage, r: f32, w: f32, opacity: f32) {
+        let size = CANVAS_SIZE as f32;
+        for py in 0..CANVAS_SIZE {
+            for px in 0..CANVAS_SIZE {
+                let d = Self::rounded_rect_sdf(px as f32 + 0.5, py as f32 + 0.5, 0.0, 0.0, size, size, r);
+                if d <= 0.0 && d >= -w {
+                    let t = (-d / w).clamp(0.0, 1.0);
+                    let ny = py as f32 / size;
+                    let dir = 1.0 - ny;
+                    let a = t * dir * opacity;
+                    if a > 0.01 {
+                        Self::blend_pixel(img, px, py, Rgba([255, 255, 255, (a * 255.0) as u8]));
+                    }
+                }
+            }
+        }
+    }
+
+    fn apply_corner_radius_static(img: &mut RgbaImage, r: f32) {
+        let size = CANVAS_SIZE as f32;
+        for py in 0..CANVAS_SIZE {
+            for px in 0..CANVAS_SIZE {
+                if !Self::is_in_rounded_rect(px as f32, py as f32, 0.0, 0.0, size, size, r) {
+                    img.put_pixel(px, py, Rgba([0, 0, 0, 0]));
+                }
+            }
+        }
     }
 
     /// Render the icon and return the raw image buffer.
@@ -635,7 +1263,7 @@ impl IconCanvas {
 
     // ── Helpers ────────────────────────────────────────────
 
-    fn resolve_fill_pixel(&self, layer: &Layer, px: f32, py: f32, x: f32, y: f32, w: f32, h: f32) -> Rgba<u8> {
+    fn resolve_fill_pixel(&self, layer: &Layer, _px: f32, py: f32, _x: f32, y: f32, _w: f32, h: f32) -> Rgba<u8> {
         if let Some(gradient) = &layer.gradient {
             let t = (py - y) / h;
             let c = Self::sample_gradient(gradient, t.clamp(0.0, 1.0));
@@ -903,6 +1531,54 @@ impl IconCanvas {
         dst[1] = ((src[1] as f32 * sa + dst[1] as f32 * da * (1.0 - sa)) / out_a) as u8;
         dst[2] = ((src[2] as f32 * sa + dst[2] as f32 * da * (1.0 - sa)) / out_a) as u8;
         dst[3] = (out_a * 255.0) as u8;
+    }
+
+    // ── HSL conversion (for change_color) ────────────────────────
+
+    fn rgb_to_hsl(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+        let max = r.max(g).max(b);
+        let min = r.min(g).min(b);
+        let l = (max + min) / 2.0;
+
+        if max - min < 0.0001 {
+            return (0.0, 0.0, l); // achromatic
+        }
+
+        let d = max - min;
+        let s = if l > 0.5 { d / (2.0 - max - min) } else { d / (max + min) };
+
+        let h = if max == r {
+            ((g - b) / d + if g < b { 6.0 } else { 0.0 }) / 6.0
+        } else if max == g {
+            ((b - r) / d + 2.0) / 6.0
+        } else {
+            ((r - g) / d + 4.0) / 6.0
+        };
+
+        (h, s, l)
+    }
+
+    fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
+        if s < 0.0001 {
+            return (l, l, l);
+        }
+
+        let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+        let p = 2.0 * l - q;
+        let h = h.fract();
+
+        fn hue_to_rgb(p: f32, q: f32, t: f32) -> f32 {
+            let t = if t < 0.0 { t + 1.0 } else if t > 1.0 { t - 1.0 } else { t };
+            if t < 1.0 / 6.0 { p + (q - p) * 6.0 * t }
+            else if t < 1.0 / 2.0 { q }
+            else if t < 2.0 / 3.0 { p + (q - p) * (2.0 / 3.0 - t) * 6.0 }
+            else { p }
+        }
+
+        let r = hue_to_rgb(p, q, h + 1.0 / 3.0);
+        let g = hue_to_rgb(p, q, h);
+        let b = hue_to_rgb(p, q, h - 1.0 / 3.0);
+        (r, g, b)
     }
 }
 
