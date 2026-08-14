@@ -12,7 +12,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-CoreIcon = { path = "/Library/System/coreicon.library" }
+coreicon = { path = "/Library/System/coreicon.library" }
 ```
 
 ## License
