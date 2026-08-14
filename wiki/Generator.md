@@ -276,8 +276,8 @@ pub fn add_depth_to_image(
 ) -> Result<RgbaImage, Box<dyn std::error::Error>>
 ```
 
-Loads the source image, resizes it to fit the 1024x1024 canvas (centered),
-then applies all requested depth effects. Returns the processed `RgbaImage`.
+Loads the source image, scales it to exactly 1024x1024, then applies all
+requested depth effects. Returns the processed `RgbaImage`.
 
 Parameters:
 
@@ -373,6 +373,12 @@ Loads the source image, blends each pixel toward `tint_color` based on
 `intensity`, then applies depth effects on top. Returns the processed
 `RgbaImage`.
 
+Colorization happens in HSL space: hue and saturation are taken from
+`tint_color` while each pixel's lightness is preserved. Pixels with near-zero
+saturation (grays, white, black) keep their original color instead of being
+tinted. `intensity` then blends linearly between the original and the
+colorized color.
+
 Parameters:
 
 | Parameter | Description |
@@ -451,10 +457,15 @@ and replacing it. The foreground (logo, text, icons) stays unchanged.
 
 ```rust
 pub enum IconMode {
-    Dark,   // background -> black
-    Light,  // background -> white
+    Dark,   // background -> dark gray (0.13, 0.13, 0.15)
+    Light,  // background -> white (1.0, 1.0, 1.0)
 }
 ```
+
+| Variant | Background replacement |
+|---|---|
+| `Dark` | `(0.13, 0.13, 0.15)` dark gray |
+| `Light` | `(1.0, 1.0, 1.0)` white |
 
 ### `dark_light_mode`
 
@@ -475,11 +486,15 @@ pub fn dark_light_mode(
 ) -> Result<RgbaImage, Box<dyn std::error::Error>>
 ```
 
-Loads the source image, samples the edge color to detect the background, then
-replaces all pixels close to that color with black (`Dark`) or white (`Light`).
-Foreground pixels are kept as-is. Depth effects are applied on top.
+Loads the source image, detects the background region with a flood fill seeded
+from the image edges, then replaces every background pixel with a solid color
+(see `IconMode`). Foreground pixels are kept as-is. Depth effects are applied
+on top.
 
-The `tolerance` for background detection is `0.18` (Euclidean distance in RGB).
+The flood fill starts from all four border edges. A 4-connected neighbor is
+added to the background region when the Euclidean RGB distance to the current
+pixel is below the threshold `0.22`; any pixel not reached by the fill is
+treated as foreground.
 
 ### `dark_light_mode_and_save`
 

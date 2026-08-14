@@ -59,7 +59,10 @@ See [Generator.md](Generator.md), [Color.md](Color.md) and
 
 ## Changelog
 
-- 2026-08-12: Added `dark_light_mode` / `dark_light_mode_and_save` to Generator.
-- 2026-08-12: Added `change_color` / `change_color_and_save` to Generator (tint + depth).
-- 2026-08-12: Added `add_depth_to_image` / `add_depth_to_image_and_save` to Generator.
+- 2026-08-14: Wiki synced with current implementation (flood-fill background
+  detection in `dark_light_mode`, replacement colors per `IconMode`, HSL
+  colorization in `change_color`).
+- 2026-08-14: Added `dark_light_mode` / `dark_light_mode_and_save` to Generator.
+- 2026-08-14: Added `change_color` / `change_color_and_save` to Generator (tint + depth).
+- 2026-08-14: Added `add_depth_to_image` / `add_depth_to_image_and_save` to Generator.
 - 2026-08-12: Initial wiki created with 6 feature pages.
