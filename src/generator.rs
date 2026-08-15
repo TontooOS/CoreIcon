@@ -173,6 +173,7 @@ pub struct IconCanvas {
     background: Background,
     layers: Vec<Layer>,
     corner_radius: f32,
+    padding: f32,
     edge_highlight_width: f32,
     edge_highlight_opacity: f32,
     frosted_opacity: f32,
@@ -187,6 +188,7 @@ impl IconCanvas {
             background: Background::color(Color::new(0.11, 0.11, 0.118, 1.0)),
             layers: Vec::new(),
             corner_radius: 0.0,
+            padding: 0.0,
             edge_highlight_width: 0.0,
             edge_highlight_opacity: 0.0,
             frosted_opacity: 0.0,
@@ -198,6 +200,10 @@ impl IconCanvas {
 
     /// Set the background.
     pub fn background(mut self, bg: Background) -> Self { self.background = bg; self }
+
+    /// Set padding (inset from canvas edges) for icon layers.
+    /// When set, `LayerContent::icon` layers are automatically inset by this amount.
+    pub fn padding(mut self, p: f32) -> Self { self.padding = p; self }
 
     /// Set corner radius for the entire canvas (rounded rect shape).
     /// Use 256.0 for 25% of 1024px (iOS-style icon).
@@ -1088,7 +1094,12 @@ impl IconCanvas {
         let name = symbol.name();
         let full = unsafe { PathBuf::from(ASSETS_DIR).join(format!("{}.png", name)) };
         if let Ok(icon_img) = image::open(&full) {
-            let resized = icon_img.resize_to_fill(layer.width as u32, layer.height as u32, image::imageops::FilterType::Lanczos3);
+            let p = self.padding;
+            let padded_x = layer.x + p;
+            let padded_y = layer.y + p;
+            let padded_w = (layer.width - p * 2.0).max(1.0);
+            let padded_h = (layer.height - p * 2.0).max(1.0);
+            let resized = icon_img.resize_to_fill(padded_w as u32, padded_h as u32, image::imageops::FilterType::Lanczos3);
             let rgba = resized.to_rgba8();
             let h = rgba.height();
             let overlay = if let Some(s) = &layer.inner_shadow {
@@ -1097,8 +1108,8 @@ impl IconCanvas {
                 None
             };
             for (px, py, pixel) in rgba.enumerate_pixels() {
-                let dx = layer.x as u32 + px;
-                let dy = layer.y as u32 + py;
+                let dx = padded_x as u32 + px;
+                let dy = padded_y as u32 + py;
                 if dx < CANVAS_SIZE && dy < CANVAS_SIZE {
                     let mut p = *pixel;
                     if let Some(tint) = &layer.fill {
