@@ -1,3 +1,4 @@
+use crate::tint::TintMatrix;
 use crate::{Color, Gradient, GradientDirection, SFSymbol};
 use ab_glyph::{FontRef, PxScale, Font};
 use image::{Rgba, RgbaImage};
@@ -19,12 +20,354 @@ pub enum IconMode {
     Light,
 }
 
+/// Algorithm used when recoloring an existing image.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RecolorMode {
+    /// HSL colorize: take hue + saturation from the tint color, keep each
+    /// pixel's lightness. Best for full-color artwork. Pure white/black carry
+    /// no hue information and are left alone (see `neutral_threshold`).
+    Colorize,
+    /// Apple accent tint: `out.rgb = tint.rgb * (0.2*luma + 0.8*value)`.
+    /// Keeps shading, pulls every colored pixel toward the accent hue.
+    /// Best for grayscale artwork.
+    AccentLuma,
+    /// Flat template replacement: RGB becomes the tint color, alpha is kept.
+    Replace,
+    /// Luminance-graded replacement: every pixel becomes the tint color
+    /// scaled by `pixel_lightness / tint_lightness` (clamped to 1.0).
+    /// Whites map to the full tint, blacks stay black, midtones shade
+    /// proportionally - unlike `Colorize`, pure white IS recolored.
+    Shaded,
+}
+
+/// Recolor settings for `change_color` / `process_image`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RecolorOptions {
+    pub tint: Color,
+    pub intensity: f32,
+    pub mode: RecolorMode,
+    /// Pixels with saturation below this keep their original color
+    /// (protects grays / white / black). Only used by [`RecolorMode::Colorize`].
+    pub neutral_threshold: f32,
+    /// Pixels within [`Self::protect_tolerance`] of this color are never
+    /// recolored - e.g. a background that was already swapped to a flat
+    /// color in the same pipeline run.
+    pub protect: Option<Color>,
+    /// Euclidean RGB distance (0.0–1.0 space) for [`Self::protect`].
+    pub protect_tolerance: f32,
+    /// Pixels within [`Self::remap_tolerance`] of this color are replaced
+    /// outright by [`Self::remap_to`] before any mode is applied - e.g. an
+    /// interior cutout that should follow the swapped background color.
+    pub remap_from: Option<Color>,
+    /// Replacement target for [`Self::remap_from`].
+    pub remap_to: Option<Color>,
+    /// Euclidean RGB distance (0.0–1.0 space) for the remap rule.
+    pub remap_tolerance: f32,
+}
+
+impl RecolorOptions {
+    pub fn new(tint: Color, intensity: f32) -> Self {
+        Self {
+            tint,
+            intensity: intensity.clamp(0.0, 1.0),
+            mode: RecolorMode::Colorize,
+            neutral_threshold: 0.05,
+            protect: None,
+            protect_tolerance: 0.12,
+            remap_from: None,
+            remap_to: None,
+            remap_tolerance: 0.12,
+        }
+    }
+    pub fn mode(mut self, mode: RecolorMode) -> Self { self.mode = mode; self }
+    pub fn neutral_threshold(mut self, t: f32) -> Self { self.neutral_threshold = t.clamp(0.0, 1.0); self }
+    /// Never recolor pixels within [`Self::protect_tolerance`] of `color`.
+    pub fn protect(mut self, color: Color) -> Self { self.protect = Some(color); self }
+    pub fn protect_tolerance(mut self, t: f32) -> Self { self.protect_tolerance = t.clamp(0.001, 1.0); self }
+    /// Replace pixels within [`Self::remap_tolerance`] of `from` with `to`.
+    pub fn remap(mut self, from: Color, to: Color) -> Self {
+        self.remap_from = Some(from);
+        self.remap_to = Some(to);
+        self
+    }
+    pub fn remap_tolerance(mut self, t: f32) -> Self { self.remap_tolerance = t.clamp(0.001, 1.0); self }
+}
+
+/// Depth-effect settings shared by the file-processing entry points.
+///
+/// Mirrors the positional parameters of the legacy functions; defaults are
+/// "effect off". Light direction points toward the light source and steers
+/// specular + inner depth (default: top-left, like macOS dock glass).
+#[derive(Debug, Clone)]
+pub struct DepthOptions {
+    pub corner_radius: f32,
+    pub shadow: Option<Shadow>,
+    pub inner_depth_blur: f32,
+    pub inner_depth_opacity: f32,
+    pub specular_opacity: f32,
+    pub edge_highlight_width: f32,
+    pub edge_highlight_opacity: f32,
+    pub light_x: f32,
+    pub light_y: f32,
+}
+
+impl Default for DepthOptions {
+    fn default() -> Self {
+        Self {
+            corner_radius: 0.0,
+            shadow: None,
+            inner_depth_blur: 0.0,
+            inner_depth_opacity: 0.25,
+            specular_opacity: 0.0,
+            edge_highlight_width: 0.0,
+            edge_highlight_opacity: 0.2,
+            light_x: -0.6,
+            light_y: -0.8,
+        }
+    }
+}
+
+impl DepthOptions {
+    pub fn new(corner_radius: f32) -> Self { Self { corner_radius, ..Self::default() } }
+    pub fn shadow(mut self, s: Shadow) -> Self { self.shadow = Some(s); self }
+    pub fn inner_depth(mut self, blur: f32, opacity: f32) -> Self {
+        self.inner_depth_blur = blur.max(0.0);
+        self.inner_depth_opacity = opacity.clamp(0.0, 1.0);
+        self
+    }
+    pub fn specular(mut self, opacity: f32) -> Self { self.specular_opacity = opacity.clamp(0.0, 1.0); self }
+    pub fn edge_highlight(mut self, width: f32, opacity: f32) -> Self {
+        self.edge_highlight_width = width.max(0.0);
+        self.edge_highlight_opacity = opacity.clamp(0.0, 1.0);
+        self
+    }
+    pub fn light_direction(mut self, x: f32, y: f32) -> Self {
+        let len = (x * x + y * y).sqrt();
+        if len > 0.0001 { self.light_x = x / len; self.light_y = y / len; }
+        self
+    }
+
+    // Legacy positional-argument bridge.
+    #[allow(clippy::too_many_arguments)]
+    fn from_legacy(
+        corner_radius: f32,
+        shadow_offset_x: Option<f32>, shadow_offset_y: Option<f32>,
+        shadow_blur: Option<f32>, shadow_opacity: Option<f32>,
+        inner_depth_blur: Option<f32>, inner_depth_opacity: Option<f32>,
+        specular_opacity: Option<f32>,
+        edge_highlight_width: Option<f32>, edge_highlight_opacity: Option<f32>,
+    ) -> Self {
+        let mut opts = Self::new(corner_radius);
+        if shadow_offset_y.is_some() || shadow_offset_x.is_some() || shadow_blur.is_some() || shadow_opacity.is_some() {
+            opts.shadow = Some(Shadow {
+                offset_x: shadow_offset_x.unwrap_or(0.0),
+                offset_y: shadow_offset_y.unwrap_or(8.0),
+                blur: shadow_blur.unwrap_or(16.0),
+                color: Color::BLACK,
+                opacity: shadow_opacity.unwrap_or(0.3),
+            });
+        }
+        if let Some(b) = inner_depth_blur { opts.inner_depth_blur = b.max(0.0); }
+        if let Some(o) = inner_depth_opacity { opts.inner_depth_opacity = o.clamp(0.0, 1.0); }
+        if let Some(o) = specular_opacity { opts.specular_opacity = o.clamp(0.0, 1.0); }
+        if let Some(w) = edge_highlight_width { opts.edge_highlight_width = w.max(0.0); }
+        if let Some(o) = edge_highlight_opacity { opts.edge_highlight_opacity = o.clamp(0.0, 1.0); }
+        opts
+    }
+}
+
+/// Everything `process_image` applies to one icon, in order:
+/// background replacement -> recolor -> depth effects.
+#[derive(Debug, Clone, Default)]
+pub struct ProcessOptions {
+    pub recolor: Option<RecolorOptions>,
+    pub background_replace: Option<Color>,
+    pub depth: DepthOptions,
+    /// When true, the flood-filled background region is excluded from
+    /// recoloring - lets `Colorize` with `neutral_threshold(0)` tint gray
+    /// artwork while the original background stays untouched.
+    pub protect_background: bool,
+}
+
+// ═══════════════════════════════════════════════════════════════
+// High-level app icon APIs
+// ═══════════════════════════════════════════════════════════════
+
+/// Background appearance for [`AppIcon`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Appearance {
+    /// Keep the original background.
+    Light,
+    /// Swap the background to the dark preset `(0.13, 0.13, 0.15)`.
+    /// Artwork colors are preserved (a blue VS Code logo stays blue);
+    /// pure-white interior cutouts follow the background color.
+    Dark,
+}
+
+/// Dark background preset used by [`Appearance::Dark`].
+pub const DARK_BACKGROUND: Color = Color::new(0.13, 0.13, 0.15, 1.0);
+
+/// Default Liquid Glass finish for app icons.
+pub fn default_app_icon_depth() -> DepthOptions {
+    DepthOptions::new(220.0)
+        .shadow(Shadow::new().offset(0.0, 10.0).blur(20.0).opacity(0.35))
+        .inner_depth(12.0, 0.25)
+        .specular(0.15)
+        .edge_highlight(4.0, 0.2)
+}
+
+impl IconCanvas {
+    /// API 1 - PNG to 3D app icon.
+    ///
+    /// Takes any flat image, scales it to 1024x1024, rounds it into the
+    /// app-icon squircle and adds the Liquid Glass depth finish. Colors are
+    /// left completely untouched.
+    ///
+    /// # Example
+    /// ```no_run
+    /// let icon = CoreIcon::generator::IconCanvas::png_to_3d_icon("logo.png")?;
+    /// icon.save("app-icon.png")?;
+    /// ```
+    pub fn png_to_3d_icon(input_path: impl AsRef<Path>) -> Result<RgbaImage, Box<dyn std::error::Error>> {
+        AppIcon::from_file(input_path).process()
+    }
+}
+
+/// API 2 - turn any icon into an app icon with appearance / color options.
+///
+/// Default equals [`IconCanvas::png_to_3d_icon`] (same colors, rounded,
+/// 1024x1024, glass depth). From there:
+///
+/// - `.dark()` puts the icon into dark mode: the background becomes dark
+///   gray while all other colors survive (VS Code stays blue) and white
+///   interior cutouts follow the background.
+/// - `.tint(color)` recolors the artwork. With `Light` this uses HSL
+///   colorize (the original background is untouched); with `Dark` it uses
+///   luminance-graded `Shaded` replacement on top of the dark background.
+///   Combine freely: `.dark().tint(red)`.
+///
+/// # Example
+/// ```no_run
+/// use CoreIcon::{Color, generator::AppIcon};
+///
+/// // Default (like API 1):
+/// AppIcon::from_file("vscode.png").save("vscode-app.png")?;
+///
+/// // Dark mode, original colors kept:
+/// AppIcon::from_file("vscode.png").dark().save("vscode-dark.png")?;
+///
+/// // Red artwork on the dark background:
+/// let red = Color::from_hex("#FF3B30").unwrap();
+/// AppIcon::from_file("vscode.png").dark().tint(red).save("vscode-red-dark.png")?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct AppIcon {
+    source: AppIconSource,
+    appearance: Appearance,
+    tint: Option<Color>,
+}
+
+#[derive(Debug, Clone)]
+enum AppIconSource {
+    File(PathBuf),
+    Image(RgbaImage),
+}
+
+impl AppIcon {
+    /// Build from any image file (PNG, JPG, ...).
+    pub fn from_file(path: impl AsRef<Path>) -> Self {
+        Self {
+            source: AppIconSource::File(path.as_ref().to_path_buf()),
+            appearance: Appearance::Light,
+            tint: None,
+        }
+    }
+
+    /// Build from an in-memory image.
+    pub fn from_image(image: &RgbaImage) -> Self {
+        Self {
+            source: AppIconSource::Image(image.clone()),
+            appearance: Appearance::Light,
+            tint: None,
+        }
+    }
+
+    /// Set the background appearance explicitly.
+    pub fn appearance(mut self, appearance: Appearance) -> Self { self.appearance = appearance; self }
+
+    /// Dark mode: dark background, artwork colors preserved.
+    pub fn dark(mut self) -> Self { self.appearance = Appearance::Dark; self }
+
+    /// Light mode: original background is kept (default).
+    pub fn light(mut self) -> Self { self.appearance = Appearance::Light; self }
+
+    /// Recolor the artwork to `color` (luminance graded `Shaded` mode).
+    pub fn tint(mut self, color: Color) -> Self { self.tint = Some(color); self }
+
+    /// Drop a previously set tint (back to original colors).
+    pub fn no_tint(mut self) -> Self { self.tint = None; self }
+
+    /// Run the pipeline and return the finished 1024x1024 icon.
+    pub fn process(&self) -> Result<RgbaImage, Box<dyn std::error::Error>> {
+        let src = match &self.source {
+            AppIconSource::File(path) => image::open(path)?.resize(
+                CANVAS_SIZE, CANVAS_SIZE, image::imageops::FilterType::Lanczos3).to_rgba8(),
+            AppIconSource::Image(img) => image::imageops::resize(
+                img, CANVAS_SIZE, CANVAS_SIZE, image::imageops::FilterType::Lanczos3),
+        };
+
+        let mut options = ProcessOptions {
+            recolor: None,
+            background_replace: None,
+            depth: default_app_icon_depth(),
+            protect_background: false,
+        };
+
+        match self.appearance {
+            Appearance::Light => {
+                // Keep the original background; tint the whole artwork -
+                // including gray artwork - while only the flood-filled
+                // background region is protected.
+                if let Some(tint) = self.tint {
+                    options.protect_background = true;
+                    options.recolor = Some(
+                        RecolorOptions::new(tint, 1.0).mode(RecolorMode::Colorize).neutral_threshold(0.0),
+                    );
+                }
+            }
+            Appearance::Dark => {
+                options.background_replace = Some(DARK_BACKGROUND);
+                options.recolor = Some(match self.tint {
+                    Some(tint) => RecolorOptions::new(tint, 1.0)
+                        .mode(RecolorMode::Shaded)
+                        .protect(DARK_BACKGROUND)
+                        .remap(Color::WHITE, DARK_BACKGROUND),
+                    None =>
+                        // intensity 0 = pass-through recolor; only the
+                        // white->background remap takes effect.
+                        RecolorOptions::new(Color::WHITE, 0.0)
+                            .remap(Color::WHITE, DARK_BACKGROUND),
+                });
+            }
+        }
+
+        Ok(IconCanvas::process_image(&src, &options))
+    }
+
+    /// Process and write a PNG to `path`.
+    pub fn save(&self, path: impl AsRef<Path>) -> Result<(), Box<dyn std::error::Error>> {
+        let img = self.process()?;
+        img.save(path.as_ref())?;
+        Ok(())
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════
 // Shadow
 // ═══════════════════════════════════════════════════════════════
 
 /// Shadow configuration for a layer element.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Shadow {
     pub offset_x: f32,
     pub offset_y: f32,
@@ -111,6 +454,9 @@ pub struct Layer {
     pub height: f32,
     pub fill: Option<Color>,
     pub gradient: Option<Gradient>,
+    /// Color-matrix recolor applied after fill/gradient. Composes with
+    /// `fill`/`gradient` (matrix runs last). See [`TintMatrix`].
+    pub tint_matrix: Option<TintMatrix>,
     pub opacity: f32,
     pub shadow: Option<Shadow>,
     pub inner_shadow: Option<Shadow>,
@@ -126,6 +472,7 @@ impl Layer {
             height: 100.0,
             fill: None,
             gradient: None,
+            tint_matrix: None,
             opacity: 1.0,
             shadow: None,
             inner_shadow: None,
@@ -136,6 +483,7 @@ impl Layer {
     pub fn size(mut self, w: f32, h: f32) -> Self { self.width = w; self.height = h; self }
     pub fn tint(mut self, c: Color) -> Self { self.fill = Some(c); self }
     pub fn gradient(mut self, g: Gradient) -> Self { self.gradient = Some(g); self }
+    pub fn tint_matrix(mut self, m: TintMatrix) -> Self { self.tint_matrix = Some(m); self }
     pub fn opacity(mut self, o: f32) -> Self { self.opacity = o.clamp(0.0, 1.0); self }
     pub fn shadow(mut self, s: Shadow) -> Self { self.shadow = Some(s); self }
     pub fn inner_shadow(mut self, s: Shadow) -> Self { self.inner_shadow = Some(s); self }
@@ -180,6 +528,8 @@ pub struct IconCanvas {
     inner_depth_blur: f32,
     inner_depth_opacity: f32,
     specular_opacity: f32,
+    light_x: f32,
+    light_y: f32,
 }
 
 impl IconCanvas {
@@ -195,6 +545,8 @@ impl IconCanvas {
             inner_depth_blur: 0.0,
             inner_depth_opacity: 0.0,
             specular_opacity: 0.0,
+            light_x: -0.6,
+            light_y: -0.8,
         }
     }
 
@@ -242,6 +594,29 @@ impl IconCanvas {
         self
     }
 
+    /// Direction of the light source, used by `specular`, `inner_depth` and
+    /// `edge_highlight`. The vector points toward the light; the default is
+    /// top-left (`-0.6, -0.8`). Values are normalized internally.
+    pub fn light_direction(mut self, x: f32, y: f32) -> Self {
+        let len = (x * x + y * y).sqrt();
+        if len > 0.0001 { self.light_x = x / len; self.light_y = y / len; }
+        self
+    }
+
+    /// One-call Liquid Glass look: iOS-style corner radius plus tuned
+    /// frosted / specular / inner-depth / edge-highlight values (defaults
+    /// derived from the macOS Tahoe dock glass parameters).
+    pub fn glass(mut self) -> Self {
+        self.corner_radius = 256.0;
+        self.frosted_opacity = 0.16;
+        self.specular_opacity = 0.30;
+        self.inner_depth_blur = 36.0;
+        self.inner_depth_opacity = 0.32;
+        self.edge_highlight_width = 6.0;
+        self.edge_highlight_opacity = 0.40;
+        self
+    }
+
     /// Add a layer (drawn in order — last = on top).
     pub fn layer(mut self, layer: Layer) -> Self { self.layers.push(layer); self }
 
@@ -253,8 +628,483 @@ impl IconCanvas {
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // add_depth — apply depth effects to an existing image
+    // Image processing core — recolor / background swap / depth effects
     // ═══════════════════════════════════════════════════════════════
+
+    /// Load an image file and run [`ProcessOptions`] on it.
+    ///
+    /// The source is scaled to exactly 1024x1024 before processing.
+    /// Returns the processed `RgbaImage`.
+    pub fn process_file(
+        input_path: impl AsRef<Path>,
+        options: &ProcessOptions,
+    ) -> Result<RgbaImage, Box<dyn std::error::Error>> {
+        let src = image::open(input_path)?;
+        let src = src.resize(CANVAS_SIZE, CANVAS_SIZE, image::imageops::FilterType::Lanczos3);
+        Ok(Self::process_image(&src.to_rgba8(), options))
+    }
+
+    /// Apply recoloring, background replacement and depth effects to an
+    /// in-memory image.
+    ///
+    /// Pipeline order:
+    /// 1. Background replacement (flood fill from the edges)
+    /// 2. Recolor ([`RecolorOptions`])
+    /// 3. Shadow -> content -> specular -> inner depth -> edge highlight
+    /// 4. Corner radius mask
+    pub fn process_image(src: &RgbaImage, options: &ProcessOptions) -> RgbaImage {
+        let mut work = src.clone();
+
+        if let Some(target) = options.background_replace {
+            work = Self::replace_background(&work, target.r, target.g, target.b);
+        }
+        if let Some(recolor) = &options.recolor {
+            let mask = if options.protect_background {
+                // Strict thresholds: this mask exists to *skip* pixels, so a
+                // false positive would silently drop artwork from the tint.
+                Some(Self::background_mask_with(&work, 0.16, 0.14))
+            } else {
+                None
+            };
+            work = Self::recolor_pixels(&work, recolor, mask.as_deref());
+        }
+
+        let mut canvas = RgbaImage::from_pixel(CANVAS_SIZE, CANVAS_SIZE, Rgba([0, 0, 0, 0]));
+        let d = &options.depth;
+        let ox = ((CANVAS_SIZE - work.width().min(CANVAS_SIZE)) / 2) as i64;
+        let oy = ((CANVAS_SIZE - work.height().min(CANVAS_SIZE)) / 2) as i64;
+
+        // 1. Shadow FIRST (behind the content), glyph-shaped via distance field.
+        if let Some(shadow) = &d.shadow {
+            let color = Color::new(shadow.color.r, shadow.color.g, shadow.color.b, shadow.opacity);
+            Self::paint_distance_shadow(
+                &mut canvas, &work,
+                ox + shadow.offset_x.round() as i64,
+                oy + shadow.offset_y.round() as i64,
+                shadow.blur, color,
+            );
+        }
+
+        // 2. Content on top of the shadow.
+        for (px, py, pixel) in work.enumerate_pixels() {
+            let x = ox + px as i64;
+            let y = oy + py as i64;
+            if x >= 0 && y >= 0 && (x as u32) < CANVAS_SIZE && (y as u32) < CANVAS_SIZE {
+                canvas.put_pixel(x as u32, y as u32, *pixel);
+            }
+        }
+
+        // 3./4. Glass effects + corner mask.
+        Self::apply_depth_effects(&mut canvas, d);
+
+        canvas
+    }
+
+    /// Recolor an image without any depth effects or canvas compositing.
+    pub fn recolor_image(src: &RgbaImage, options: &RecolorOptions) -> RgbaImage {
+        Self::recolor_pixels(src, options, None)
+    }
+
+    /// Replace the flood-filled background region with an arbitrary color.
+    /// Generalization of `dark_light_mode` (which maps `IconMode` presets).
+    pub fn set_background_color(
+        input_path: impl AsRef<Path>,
+        target: Color,
+        depth: DepthOptions,
+    ) -> Result<RgbaImage, Box<dyn std::error::Error>> {
+        Self::process_file(
+            input_path,
+            &ProcessOptions { recolor: None, background_replace: Some(target), depth, ..Default::default() },
+        )
+    }
+
+    // ── Processing internals ──────────────────────────────────
+
+    /// Flood-fill the border-connected background and repaint it `target`.
+    fn replace_background(rgba: &RgbaImage, tr: f32, tg: f32, tb: f32) -> RgbaImage {
+        let mask = Self::background_mask(rgba);
+        let mut out = RgbaImage::from_pixel(rgba.width(), rgba.height(), Rgba([0, 0, 0, 0]));
+        for (px, py, pixel) in rgba.enumerate_pixels() {
+            let a = pixel[3];
+            if a < 3 { continue; }
+            if mask[py as usize * rgba.width() as usize + px as usize] {
+                out.put_pixel(px, py, Rgba([
+                    (tr * 255.0).round() as u8,
+                    (tg * 255.0).round() as u8,
+                    (tb * 255.0).round() as u8,
+                    a,
+                ]));
+            } else {
+                out.put_pixel(px, py, *pixel);
+            }
+        }
+        out
+    }
+
+    /// Compute the border-connected background mask (true = background),
+    /// with the standard (swap-oriented) thresholds.
+    fn background_mask(rgba: &RgbaImage) -> Vec<bool> {
+        Self::background_mask_with(rgba, 0.32, 0.25)
+    }
+
+    /// Compute the border-connected background mask (true = background).
+    ///
+    /// Robust against soft logo edges: a pixel joins the background only when
+    /// it is close to the border reference color AND close to its neighbour -
+    /// a pure neighbour chain would leak through anti-aliased gradients into
+    /// the artwork. One dilation pass pulls low-saturation halo pixels into
+    /// the mask so the swapped background has no bright fringe.
+    fn background_mask_with(rgba: &RgbaImage, ref_threshold: f32, chain_threshold: f32) -> Vec<bool> {
+        let w = rgba.width() as usize;
+        let h = rgba.height() as usize;
+        let mut is_bg = vec![false; w * h];
+        let mut queue: std::collections::VecDeque<(usize, usize)> = std::collections::VecDeque::new();
+
+        // Reference colour: average of the outermost 2px border.
+        let mut rr = 0u64;
+        let mut rg = 0u64;
+        let mut rb = 0u64;
+        let mut n = 0u64;
+        let mut acc = |p: &Rgba<u8>| {
+            rr += p[0] as u64;
+            rg += p[1] as u64;
+            rb += p[2] as u64;
+            n += 1;
+        };
+        for x in 0..w {
+            acc(rgba.get_pixel(x as u32, 0));
+            acc(rgba.get_pixel(x as u32, h as u32 - 1));
+        }
+        for y in 0..h {
+            acc(rgba.get_pixel(0, y as u32));
+            acc(rgba.get_pixel(w as u32 - 1, y as u32));
+        }
+        let (ref_r, ref_g, ref_b) = (
+            rr as f32 / 255.0 / n as f32,
+            rg as f32 / 255.0 / n as f32,
+            rb as f32 / 255.0 / n as f32,
+        );
+
+        let dist = |a: (f32, f32, f32), b: (f32, f32, f32)| -> f32 {
+            ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2) + (a.2 - b.2).powi(2)).sqrt()
+        };
+        let color_at = |x: usize, y: usize| -> (f32, f32, f32) {
+            let p = rgba.get_pixel(x as u32, y as u32);
+            (p[0] as f32 / 255.0, p[1] as f32 / 255.0, p[2] as f32 / 255.0)
+        };
+
+        for x in 0..w {
+            queue.push_back((x, 0));
+            queue.push_back((x, h - 1));
+        }
+        for y in 1..h - 1 {
+            queue.push_back((0, y));
+            queue.push_back((w - 1, y));
+        }
+
+        while let Some((x, y)) = queue.pop_front() {
+            let idx = y * w + x;
+            if is_bg[idx] { continue; }
+            if dist(color_at(x, y), (ref_r, ref_g, ref_b)) >= ref_threshold { continue; }
+            is_bg[idx] = true;
+
+            for (dx, dy) in [(-1i64, 0i64), (1, 0), (0, -1), (0, 1)] {
+                let nx = x as i64 + dx;
+                let ny = y as i64 + dy;
+                if nx < 0 || ny < 0 || nx >= w as i64 || ny >= h as i64 { continue; }
+                let (nx, ny) = (nx as usize, ny as usize);
+                let nidx = ny * w + nx;
+                if is_bg[nidx] { continue; }
+                if dist(color_at(nx, ny), color_at(x, y)) < chain_threshold {
+                    queue.push_back((nx, ny));
+                }
+            }
+        }
+
+        // Dilation: absorb anti-aliased fringe pixels (near-reference, low
+        // chroma) that touch the background on at least two sides.
+        let mut halo = vec![false; w * h];
+        for y in 1..h - 1 {
+            for x in 1..w - 1 {
+                let idx = y * w + x;
+                if is_bg[idx] { continue; }
+                let c = color_at(x, y);
+                if dist(c, (ref_r, ref_g, ref_b)) >= 0.60 { continue; }
+                let chroma = c.0.max(c.1).max(c.2) - c.0.min(c.1).min(c.2);
+                if chroma > 0.18 { continue; }
+                let mut bg_neighbors = 0;
+                for (dx, dy) in [(-1i64, 0i64), (1, 0), (0, -1), (0, 1)] {
+                    let ni = (y as i64 + dy) as usize * w + (x as i64 + dx) as usize;
+                    if is_bg[ni] { bg_neighbors += 1; }
+                }
+                if bg_neighbors >= 2 { halo[idx] = true; }
+            }
+        }
+
+        for i in 0..is_bg.len() { is_bg[i] = is_bg[i] || halo[i]; }
+        is_bg
+    }
+
+    /// Improved recolor pass.
+    ///
+    /// Works on straight-alpha values with proper rounding; anti-aliased edge
+    /// pixels no longer produce dark fringes because transparent neighbors do
+    /// not bleed into the conversion.
+    fn recolor_pixels(rgba: &RgbaImage, o: &RecolorOptions, bg_mask: Option<&[bool]>) -> RgbaImage {
+        let intensity = o.intensity.clamp(0.0, 1.0);
+        let mut out = RgbaImage::from_pixel(rgba.width(), rgba.height(), Rgba([0, 0, 0, 0]));
+
+        let (tgt_h, tgt_s, tgt_l) = Self::rgb_to_hsl(o.tint.r, o.tint.g, o.tint.b);
+        let w = rgba.width() as usize;
+
+        for (px, py, pixel) in rgba.enumerate_pixels() {
+            if let Some(mask) = bg_mask {
+                if mask[py as usize * w + px as usize] {
+                    out.put_pixel(px, py, *pixel);
+                    continue;
+                }
+            }
+            let a = pixel[3] as f32 / 255.0;
+            if a < 0.01 {
+                out.put_pixel(px, py, *pixel);
+                continue;
+            }
+            let r = pixel[0] as f32 / 255.0;
+            let g = pixel[1] as f32 / 255.0;
+            let b = pixel[2] as f32 / 255.0;
+
+            if let (Some(from), Some(to)) = (o.remap_from, o.remap_to) {
+                let d = ((r - from.r).powi(2) + (g - from.g).powi(2) + (b - from.b).powi(2)).sqrt();
+                if d < o.remap_tolerance {
+                    out.put_pixel(px, py, Rgba([
+                        (to.r * 255.0).round() as u8,
+                        (to.g * 255.0).round() as u8,
+                        (to.b * 255.0).round() as u8,
+                        pixel[3],
+                    ]));
+                    continue;
+                }
+            }
+
+            if let Some(protect) = o.protect {
+                let d = ((r - protect.r).powi(2) + (g - protect.g).powi(2) + (b - protect.b).powi(2)).sqrt();
+                if d < o.protect_tolerance {
+                    out.put_pixel(px, py, *pixel);
+                    continue;
+                }
+            }
+
+            let (nr, ng, nb) = match o.mode {
+                RecolorMode::Replace => (o.tint.r, o.tint.g, o.tint.b),
+                RecolorMode::AccentLuma => {
+                    let luma = Self::luma(r, g, b);
+                    (
+                        o.tint.r * (0.2 * luma + 0.8 * r),
+                        o.tint.g * (0.2 * luma + 0.8 * g),
+                        o.tint.b * (0.2 * luma + 0.8 * b),
+                    )
+                }
+                RecolorMode::Shaded => {
+                    let (_, _, l) = Self::rgb_to_hsl(r, g, b);
+                    let k = if tgt_l <= 0.001 { l } else { (l / tgt_l).min(1.0) };
+                    (o.tint.r * k, o.tint.g * k, o.tint.b * k)
+                }
+                RecolorMode::Colorize => {
+                    let (_, s, l) = Self::rgb_to_hsl(r, g, b);
+                    // threshold > 0 protects near-neutral pixels; with
+                    // threshold == 0 even pure grays are colorized.
+                    let keep_neutral = o.neutral_threshold > 0.0 && s <= o.neutral_threshold;
+                    if !keep_neutral {
+                        Self::hsl_to_rgb(tgt_h, tgt_s.max(s), l)
+                    } else {
+                        (r, g, b)
+                    }
+                }
+            };
+
+            let fr = r + (nr - r) * intensity;
+            let fg = g + (ng - g) * intensity;
+            let fb = b + (nb - b) * intensity;
+
+            out.put_pixel(px, py, Rgba([
+                (fr * 255.0).round().clamp(0.0, 255.0) as u8,
+                (fg * 255.0).round().clamp(0.0, 255.0) as u8,
+                (fb * 255.0).round().clamp(0.0, 255.0) as u8,
+                pixel[3],
+            ]));
+        }
+        out
+    }
+
+    /// Glyph-shaped drop shadow: chamfer distance transform over the content
+    /// silhouette (already placed at its final position), then a smoothstep
+    /// falloff. O(n) regardless of blur radius — the previous stamp-blur was
+    /// O(n * blur^2).
+    fn paint_distance_shadow(
+        canvas: &mut RgbaImage,
+        content: &RgbaImage,
+        cx: i64, cy: i64,
+        blur: f32,
+        color: Color,
+    ) {
+        let blur = blur.max(0.5);
+        let w = canvas.width() as usize;
+        let h = canvas.height() as usize;
+        const INF: f32 = 1.0e9;
+        let mut dist = vec![INF; w * h];
+
+        for (px, py, pixel) in content.enumerate_pixels() {
+            if pixel[3] < 10 { continue; }
+            let x = cx + px as i64;
+            let y = cy + py as i64;
+            if x >= 0 && y >= 0 && (x as u32) < canvas.width() && (y as u32) < canvas.height() {
+                dist[y as usize * w + x as usize] = 0.0;
+            }
+        }
+
+        let (d1, d2) = (1.0f32, std::f32::consts::SQRT_2);
+        // Forward pass (top-left origin).
+        for y in 0..h {
+            for x in 0..w {
+                let i = y * w + x;
+                let mut v = dist[i];
+                if x > 0 { v = v.min(dist[i - 1] + d1); }
+                if y > 0 {
+                    v = v.min(dist[i - w] + d1);
+                    if x > 0 { v = v.min(dist[i - w - 1] + d2); }
+                    if x + 1 < w { v = v.min(dist[i - w + 1] + d2); }
+                }
+                dist[i] = v;
+            }
+        }
+        // Backward pass (bottom-right origin).
+        for y in (0..h).rev() {
+            for x in (0..w).rev() {
+                let i = y * w + x;
+                let mut v = dist[i];
+                if x + 1 < w { v = v.min(dist[i + 1] + d1); }
+                if y + 1 < h {
+                    v = v.min(dist[i + w] + d1);
+                    if x + 1 < w { v = v.min(dist[i + w + 1] + d2); }
+                    if x > 0 { v = v.min(dist[i + w - 1] + d2); }
+                }
+                dist[i] = v;
+            }
+        }
+
+        for y in 0..h {
+            for x in 0..w {
+                let dd = dist[y * w + x];
+                if dd >= blur { continue; }
+                let t = 1.0 - dd / blur;
+                let a = color.a * t * t * (3.0 - 2.0 * t);
+                if a <= 0.004 { continue; }
+                Self::blend_pixel(canvas, x as u32, y as u32, Rgba([
+                    (color.r * 255.0).round() as u8,
+                    (color.g * 255.0).round() as u8,
+                    (color.b * 255.0).round() as u8,
+                    (a * 255.0).round() as u8,
+                ]));
+            }
+        }
+    }
+
+    /// Specular rim + inner depth + edge highlight + corner mask, all steered
+    /// by one light direction. The specular band uses the rounded-rect surface
+    /// normal (rim lighting), so the sheen wraps around corners like real
+    /// glass instead of being a flat top gradient.
+    fn apply_depth_effects(img: &mut RgbaImage, d: &DepthOptions) {
+        if d.corner_radius <= 0.0 { return; }
+        let size = CANVAS_SIZE as f32;
+        let r = d.corner_radius.min(size / 2.0);
+        let band = size * 0.035;
+
+        if d.specular_opacity > 0.0 {
+            for py in 0..CANVAS_SIZE {
+                for px in 0..CANVAS_SIZE {
+                    let (sdf, n) =
+                        Self::rounded_rect_sdf_normal(px as f32 + 0.5, py as f32 + 0.5, size, size, r);
+                    if sdf >= 0.0 || -sdf > band { continue; }
+                    let rim = (n[0] * d.light_x + n[1] * d.light_y).max(0.0);
+                    if rim <= 0.001 { continue; }
+                    let edge_t = 1.0 + sdf / band;
+                    let a = edge_t * edge_t * rim * d.specular_opacity;
+                    if a < 0.01 { continue; }
+                    Self::blend_pixel(img, px, py, Rgba([255, 255, 255, (a * 255.0).round() as u8]));
+                }
+            }
+        }
+
+        if d.inner_depth_blur > 0.0 && d.inner_depth_opacity > 0.0 {
+            let blur = d.inner_depth_blur;
+            for py in 0..CANVAS_SIZE {
+                for px in 0..CANVAS_SIZE {
+                    let (sdf, _) =
+                        Self::rounded_rect_sdf_normal(px as f32 + 0.5, py as f32 + 0.5, size, size, r);
+                    if sdf >= 0.0 || -sdf > blur { continue; }
+                    // Darkness grows away from the light (planar gradient).
+                    let darkness = (0.5
+                        - ((px as f32 + 0.5) / size - 0.5) * d.light_x
+                        - ((py as f32 + 0.5) / size - 0.5) * d.light_y)
+                        .clamp(0.0, 1.0);
+                    let t = (-sdf / blur).clamp(0.0, 1.0);
+                    let a = (1.0 - t) * darkness * d.inner_depth_opacity;
+                    if a < 0.01 { continue; }
+                    Self::blend_pixel(img, px, py, Rgba([0, 0, 0, (a * 255.0).round() as u8]));
+                }
+            }
+        }
+
+        if d.edge_highlight_width > 0.0 {
+            let ew = d.edge_highlight_width;
+            for py in 0..CANVAS_SIZE {
+                for px in 0..CANVAS_SIZE {
+                    let (sdf, n) =
+                        Self::rounded_rect_sdf_normal(px as f32 + 0.5, py as f32 + 0.5, size, size, r);
+                    if sdf >= 0.0 || -sdf > ew { continue; }
+                    let rim = (n[0] * d.light_x + n[1] * d.light_y).max(0.15);
+                    let a = (-sdf / ew) * rim * d.edge_highlight_opacity;
+                    if a < 0.01 { continue; }
+                    Self::blend_pixel(img, px, py, Rgba([255, 255, 255, (a * 255.0).round() as u8]));
+                }
+            }
+        }
+
+        // Corner radius mask last.
+        for py in 0..CANVAS_SIZE {
+            for px in 0..CANVAS_SIZE {
+                let (sdf, _) =
+                    Self::rounded_rect_sdf_normal(px as f32 + 0.5, py as f32 + 0.5, size, size, r);
+                if sdf >= 0.0 {
+                    img.put_pixel(px, py, Rgba([0, 0, 0, 0]));
+                }
+            }
+        }
+    }
+
+    /// Signed distance plus outward surface normal of a centered rounded rect
+    /// (negative distance = inside).
+    fn rounded_rect_sdf_normal(px: f32, py: f32, w: f32, h: f32, r: f32) -> (f32, [f32; 2]) {
+        let half_w = w / 2.0;
+        let half_h = h / 2.0;
+        let r = r.min(half_w).min(half_h);
+        let cx = half_w + (px - half_w).clamp(-half_w + r, half_w - r);
+        let cy = half_h + (py - half_h).clamp(-half_h + r, half_h - r);
+        let dx = px - cx;
+        let dy = py - cy;
+        let len = (dx * dx + dy * dy).sqrt();
+        let sdf = len - r;
+        let n = if len > 0.0001 {
+            [dx / len, dy / len]
+        } else {
+            [0.0, -1.0]
+        };
+        (sdf, n)
+    }
+
+    fn luma(r: f32, g: f32, b: f32) -> f32 {
+        crate::tint::LUMA_R * r + crate::tint::LUMA_G * g + crate::tint::LUMA_B * b
+    }
 
     /// Load an existing image and apply depth effects (shadow, inner depth,
     /// specular highlight, edge highlight, corner radius).
@@ -293,60 +1143,18 @@ impl IconCanvas {
         edge_highlight_width: Option<f32>,
         edge_highlight_opacity: Option<f32>,
     ) -> Result<RgbaImage, Box<dyn std::error::Error>> {
-        let src = image::open(input_path)?;
-        let src = src.resize(CANVAS_SIZE, CANVAS_SIZE, image::imageops::FilterType::Lanczos3);
-
-        let mut canvas = RgbaImage::from_pixel(CANVAS_SIZE, CANVAS_SIZE, Rgba([0, 0, 0, 0]));
-
-        let sw = src.width();
-        let sh = src.height();
-        let ox = (CANVAS_SIZE - sw) / 2;
-        let oy = (CANVAS_SIZE - sh) / 2;
-        let rgba = src.to_rgba8();
-
-        // 1. Draw shadow FIRST (so it appears behind the image)
-        if let Some(sy) = shadow_offset_y {
-            let sx = shadow_offset_x.unwrap_or(0.0);
-            let blur = shadow_blur.unwrap_or(16.0);
-            let opacity = shadow_opacity.unwrap_or(0.3);
-            let shadow_color = Color::new(0.0, 0.0, 0.0, opacity);
-            Self::draw_shadow_for_content(&mut canvas, &rgba, ox, oy, sx, sy, blur, shadow_color);
-        }
-
-        // 2. Draw the source image ON TOP of the shadow
-        for (px, py, pixel) in rgba.enumerate_pixels() {
-            canvas.put_pixel(ox + px, oy + py, *pixel);
-        }
-
-        // Specular highlight (glossy rim)
-        if let Some(op) = specular_opacity {
-            if op > 0.0 && corner_radius > 0.0 {
-                Self::draw_specular_static(&mut canvas, corner_radius, op);
-            }
-        }
-
-        // Inner depth (directional bevel)
-        if let Some(blur) = inner_depth_blur {
-            let opacity = inner_depth_opacity.unwrap_or(0.25);
-            if blur > 0.0 && opacity > 0.0 && corner_radius > 0.0 {
-                Self::draw_inner_depth_static(&mut canvas, corner_radius, blur, opacity);
-            }
-        }
-
-        // Edge highlight
-        if let Some(w) = edge_highlight_width {
-            let opacity = edge_highlight_opacity.unwrap_or(0.2);
-            if w > 0.0 && corner_radius > 0.0 {
-                Self::draw_edge_highlight_static(&mut canvas, corner_radius, w, opacity);
-            }
-        }
-
-        // Corner radius mask
-        if corner_radius > 0.0 {
-            Self::apply_corner_radius_static(&mut canvas, corner_radius);
-        }
-
-        Ok(canvas)
+        Self::process_file(input_path, &ProcessOptions {
+            recolor: None,
+            background_replace: None,
+            depth: DepthOptions::from_legacy(
+                corner_radius,
+                shadow_offset_x, shadow_offset_y, shadow_blur, shadow_opacity,
+                inner_depth_blur, inner_depth_opacity,
+                specular_opacity,
+                edge_highlight_width, edge_highlight_opacity,
+            ),
+            ..Default::default()
+        })
     }
 
     /// Convenience: load image, apply depth, save to output path.
@@ -418,95 +1226,18 @@ impl IconCanvas {
         edge_highlight_width: Option<f32>,
         edge_highlight_opacity: Option<f32>,
     ) -> Result<RgbaImage, Box<dyn std::error::Error>> {
-        let src = image::open(input_path)?;
-        let src = src.resize(CANVAS_SIZE, CANVAS_SIZE, image::imageops::FilterType::Lanczos3);
-
-        let mut canvas = RgbaImage::from_pixel(CANVAS_SIZE, CANVAS_SIZE, Rgba([0, 0, 0, 0]));
-
-        let sw = src.width();
-        let sh = src.height();
-        let ox = (CANVAS_SIZE - sw) / 2;
-        let oy = (CANVAS_SIZE - sh) / 2;
-        let rgba = src.to_rgba8();
-
-        // HSL-based colorize: preserve lightness, swap hue + saturation
-        let intensity = intensity.clamp(0.0, 1.0);
-        let (tgt_h, tgt_s, _) = Self::rgb_to_hsl(tint_color.r, tint_color.g, tint_color.b);
-        let mut tinted = RgbaImage::from_pixel(CANVAS_SIZE, CANVAS_SIZE, Rgba([0, 0, 0, 0]));
-        for (px, py, pixel) in rgba.enumerate_pixels() {
-            let a = pixel[3] as f32 / 255.0;
-            if a < 0.01 { continue; }
-            let r = pixel[0] as f32 / 255.0;
-            let g = pixel[1] as f32 / 255.0;
-            let b = pixel[2] as f32 / 255.0;
-            let (h, s, l) = Self::rgb_to_hsl(r, g, b);
-
-            // Only colorize pixels with meaningful saturation
-            // Near-neutral (gray/white/black) pixels keep their original color
-            let (new_h, new_s) = if s > 0.05 {
-                (tgt_h, tgt_s)
-            } else {
-                (h, s)
-            };
-
-            let (nr, ng, nb) = Self::hsl_to_rgb(new_h, new_s, l);
-
-            // Blend between original and colorized based on intensity
-            let fr = r + (nr - r) * intensity;
-            let fg = g + (ng - g) * intensity;
-            let fb = b + (nb - b) * intensity;
-
-            tinted.put_pixel(px, py, Rgba([
-                (fr * 255.0) as u8,
-                (fg * 255.0) as u8,
-                (fb * 255.0) as u8,
-                (a * 255.0) as u8,
-            ]));
-        }
-
-        // 1. Draw shadow FIRST (so it appears behind the image)
-        if let Some(sy) = shadow_offset_y {
-            let sx = shadow_offset_x.unwrap_or(0.0);
-            let blur = shadow_blur.unwrap_or(16.0);
-            let opacity = shadow_opacity.unwrap_or(0.3);
-            let shadow_color = Color::new(0.0, 0.0, 0.0, opacity);
-            Self::draw_shadow_for_content(&mut canvas, &tinted, ox, oy, sx, sy, blur, shadow_color);
-        }
-
-        // 2. Draw the tinted image ON TOP of the shadow
-        for (px, py, pixel) in tinted.enumerate_pixels() {
-            canvas.put_pixel(ox + px, oy + py, *pixel);
-        }
-
-        // Specular highlight (glossy rim) — NOT tinted
-        if let Some(op) = specular_opacity {
-            if op > 0.0 && corner_radius > 0.0 {
-                Self::draw_specular_static(&mut canvas, corner_radius, op);
-            }
-        }
-
-        // Inner depth — NOT tinted
-        if let Some(blur) = inner_depth_blur {
-            let opacity = inner_depth_opacity.unwrap_or(0.25);
-            if blur > 0.0 && opacity > 0.0 && corner_radius > 0.0 {
-                Self::draw_inner_depth_static(&mut canvas, corner_radius, blur, opacity);
-            }
-        }
-
-        // Edge highlight — NOT tinted
-        if let Some(w) = edge_highlight_width {
-            let opacity = edge_highlight_opacity.unwrap_or(0.2);
-            if w > 0.0 && corner_radius > 0.0 {
-                Self::draw_edge_highlight_static(&mut canvas, corner_radius, w, opacity);
-            }
-        }
-
-        // Corner radius mask
-        if corner_radius > 0.0 {
-            Self::apply_corner_radius_static(&mut canvas, corner_radius);
-        }
-
-        Ok(canvas)
+        Self::process_file(input_path, &ProcessOptions {
+            recolor: Some(RecolorOptions::new(tint_color, intensity)),
+            background_replace: None,
+            depth: DepthOptions::from_legacy(
+                corner_radius,
+                shadow_offset_x, shadow_offset_y, shadow_blur, shadow_opacity,
+                inner_depth_blur, inner_depth_opacity,
+                specular_opacity,
+                edge_highlight_width, edge_highlight_opacity,
+            ),
+            ..Default::default()
+        })
     }
 
     /// Convenience: tint an icon and save to output path.
@@ -562,130 +1293,21 @@ impl IconCanvas {
         edge_highlight_width: Option<f32>,
         edge_highlight_opacity: Option<f32>,
     ) -> Result<RgbaImage, Box<dyn std::error::Error>> {
-        let src = image::open(input_path)?;
-        let src = src.resize(CANVAS_SIZE, CANVAS_SIZE, image::imageops::FilterType::Lanczos3);
-
-        let mut canvas = RgbaImage::from_pixel(CANVAS_SIZE, CANVAS_SIZE, Rgba([0, 0, 0, 0]));
-
-        let sw = src.width();
-        let sh = src.height();
-        let ox = (CANVAS_SIZE - sw) / 2;
-        let oy = (CANVAS_SIZE - sh) / 2;
-        let rgba = src.to_rgba8();
-
-        // Target color for background replacement
-        let (target_r, target_g, target_b) = match mode {
+        let (r, g, b) = match mode {
             IconMode::Dark => (0.13, 0.13, 0.15),
             IconMode::Light => (1.0, 1.0, 1.0),
         };
-
-        // Flood-fill background detection from edges
-        let w = rgba.width() as usize;
-        let h = rgba.height() as usize;
-        let mut is_bg = vec![false; w * h];
-        let mut queue: std::collections::VecDeque<(usize, usize)> = std::collections::VecDeque::new();
-
-        // Seed: all edge pixels
-        for x in 0..w {
-            queue.push_back((x, 0));
-            queue.push_back((x, h - 1));
-        }
-        for y in 1..h - 1 {
-            queue.push_back((0, y));
-            queue.push_back((w - 1, y));
-        }
-
-        let color_at = |x: usize, y: usize| -> (f32, f32, f32) {
-            let p = rgba.get_pixel(x as u32, y as u32);
-            (p[0] as f32 / 255.0, p[1] as f32 / 255.0, p[2] as f32 / 255.0)
-        };
-
-        let threshold = 0.22;
-
-        while let Some((x, y)) = queue.pop_front() {
-            let idx = y * w + x;
-            if is_bg[idx] { continue; }
-
-            let (cr, cg, cb) = color_at(x, y);
-            is_bg[idx] = true;
-
-            // Check 4-connected neighbors
-            let neighbors: [(isize, isize); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
-            for (dx, dy) in neighbors {
-                let nx = x as isize + dx;
-                let ny = y as isize + dy;
-                if nx < 0 || ny < 0 || nx >= w as isize || ny >= h as isize { continue; }
-                let nx = nx as usize;
-                let ny = ny as usize;
-                let nidx = ny * w + nx;
-                if is_bg[nidx] { continue; }
-
-                let (nr, ng, nb) = color_at(nx, ny);
-                let dr = cr - nr;
-                let dg = cg - ng;
-                let db = cb - nb;
-                let dist = (dr * dr + dg * dg + db * db).sqrt();
-                if dist < threshold {
-                    queue.push_back((nx, ny));
-                }
-            }
-        }
-
-        let mut processed = RgbaImage::from_pixel(CANVAS_SIZE, CANVAS_SIZE, Rgba([0, 0, 0, 0]));
-        for (px, py, pixel) in rgba.enumerate_pixels() {
-            let a = pixel[3] as f32 / 255.0;
-            if a < 0.01 { continue; }
-            let idx = py as usize * w + px as usize;
-            let (nr, ng, nb) = if is_bg[idx] {
-                (target_r, target_g, target_b)
-            } else {
-                (pixel[0] as f32 / 255.0, pixel[1] as f32 / 255.0, pixel[2] as f32 / 255.0)
-            };
-            processed.put_pixel(px, py, Rgba([
-                (nr * 255.0) as u8,
-                (ng * 255.0) as u8,
-                (nb * 255.0) as u8,
-                (a * 255.0) as u8,
-            ]));
-        }
-
-        // 1. Draw shadow FIRST
-        if let Some(sy) = shadow_offset_y {
-            let sx = shadow_offset_x.unwrap_or(0.0);
-            let blur = shadow_blur.unwrap_or(16.0);
-            let opacity = shadow_opacity.unwrap_or(0.3);
-            let shadow_color = Color::new(0.0, 0.0, 0.0, opacity);
-            Self::draw_shadow_for_content(&mut canvas, &processed, ox, oy, sx, sy, blur, shadow_color);
-        }
-
-        // 2. Draw the processed image
-        for (px, py, pixel) in processed.enumerate_pixels() {
-            canvas.put_pixel(ox + px, oy + py, *pixel);
-        }
-
-        // Depth effects
-        if let Some(op) = specular_opacity {
-            if op > 0.0 && corner_radius > 0.0 {
-                Self::draw_specular_static(&mut canvas, corner_radius, op);
-            }
-        }
-        if let Some(blur) = inner_depth_blur {
-            let opacity = inner_depth_opacity.unwrap_or(0.25);
-            if blur > 0.0 && opacity > 0.0 && corner_radius > 0.0 {
-                Self::draw_inner_depth_static(&mut canvas, corner_radius, blur, opacity);
-            }
-        }
-        if let Some(w) = edge_highlight_width {
-            let opacity = edge_highlight_opacity.unwrap_or(0.2);
-            if w > 0.0 && corner_radius > 0.0 {
-                Self::draw_edge_highlight_static(&mut canvas, corner_radius, w, opacity);
-            }
-        }
-        if corner_radius > 0.0 {
-            Self::apply_corner_radius_static(&mut canvas, corner_radius);
-        }
-
-        Ok(canvas)
+        Self::set_background_color(
+            input_path,
+            Color::new(r, g, b, 1.0),
+            DepthOptions::from_legacy(
+                corner_radius,
+                shadow_offset_x, shadow_offset_y, shadow_blur, shadow_opacity,
+                inner_depth_blur, inner_depth_opacity,
+                specular_opacity,
+                edge_highlight_width, edge_highlight_opacity,
+            ),
+        )
     }
 
     /// Convenience: switch icon mode and save.
@@ -715,162 +1337,6 @@ impl IconCanvas {
         Ok(())
     }
 
-    /// Sample the dominant color from the edge pixels of an image.
-    /// Averages the outermost 4px border to get a clean background color.
-    fn sample_edge_color(img: &RgbaImage) -> [u8; 3] {
-        let (w, h) = (img.width(), img.height());
-        let mut r_sum: u64 = 0;
-        let mut g_sum: u64 = 0;
-        let mut b_sum: u64 = 0;
-        let mut count: u64 = 0;
-        let border = 4u32;
-
-        for x in 0..w {
-            for dy in 0..border.min(h) {
-                let p = *img.get_pixel(x, dy);
-                r_sum += p[0] as u64;
-                g_sum += p[1] as u64;
-                b_sum += p[2] as u64;
-                count += 1;
-                if h > dy + 1 {
-                    let p2 = *img.get_pixel(x, h - 1 - dy);
-                    r_sum += p2[0] as u64;
-                    g_sum += p2[1] as u64;
-                    b_sum += p2[2] as u64;
-                    count += 1;
-                }
-            }
-        }
-        for y in 0..h {
-            for dx in 0..border.min(w) {
-                let p = *img.get_pixel(dx, y);
-                r_sum += p[0] as u64;
-                g_sum += p[1] as u64;
-                b_sum += p[2] as u64;
-                count += 1;
-                if w > dx + 1 {
-                    let p2 = *img.get_pixel(w - 1 - dx, y);
-                    r_sum += p2[0] as u64;
-                    g_sum += p2[1] as u64;
-                    b_sum += p2[2] as u64;
-                    count += 1;
-                }
-            }
-        }
-
-        if count == 0 {
-            return [0, 0, 0];
-        }
-        [
-            (r_sum / count) as u8,
-            (g_sum / count) as u8,
-            (b_sum / count) as u8,
-        ]
-    }
-
-    /// Draw a shadow based on the alpha channel of the source image.
-    fn draw_shadow_for_content(
-        canvas: &mut RgbaImage,
-        src: &RgbaImage,
-        ox: u32, oy: u32,
-        offset_x: f32, offset_y: f32, blur: f32, color: Color,
-    ) {
-        let blur_px = blur as i32;
-        let sw = src.width();
-        let sh = src.height();
-        for sy in 0..sh {
-            for sx in 0..sw {
-                let pixel = src.get_pixel(sx, sy);
-                if pixel[3] < 10 { continue; }
-                let base_x = ox as i32 + sx as i32 + offset_x as i32;
-                let base_y = oy as i32 + sy as i32 + offset_y as i32;
-                // Draw blurred shadow around this pixel
-                for dy in -blur_px..=blur_px {
-                    for dx in -blur_px..=blur_px {
-                        let px = base_x + dx;
-                        let py = base_y + dy;
-                        if px < 0 || py < 0 || px >= CANVAS_SIZE as i32 || py >= CANVAS_SIZE as i32 { continue; }
-                        let dist = ((dx * dx + dy * dy) as f32).sqrt();
-                        let alpha = (1.0 - (dist / blur).min(1.0)).max(0.0) * color.a;
-                        if alpha > 0.01 {
-                            let rgba = Self::color_to_rgba(Color::new(color.r, color.g, color.b, alpha));
-                            Self::blend_pixel(canvas, px as u32, py as u32, rgba);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    fn draw_specular_static(img: &mut RgbaImage, r: f32, opacity: f32) {
-        let size = CANVAS_SIZE as f32;
-        let band = size * 0.035;
-        for py in 0..CANVAS_SIZE {
-            for px in 0..CANVAS_SIZE {
-                if !Self::is_in_rounded_rect(px as f32, py as f32, 0.0, 0.0, size, size, r) { continue; }
-                let d = Self::rounded_rect_sdf(px as f32 + 0.5, py as f32 + 0.5, 0.0, 0.0, size, size, r);
-                if d >= 0.0 { continue; }
-                let dist_from_edge = -d;
-                if dist_from_edge > band { continue; }
-                let edge_t = 1.0 - (dist_from_edge / band);
-                let edge_fade = edge_t * edge_t;
-                let ny = py as f32 / size;
-                let dir = 1.0 - ny;
-                let a = edge_fade * dir * opacity;
-                if a < 0.01 { continue; }
-                Self::blend_pixel(img, px, py, Rgba([255, 255, 255, (a * 255.0) as u8]));
-            }
-        }
-    }
-
-    fn draw_inner_depth_static(img: &mut RgbaImage, r: f32, blur: f32, opacity: f32) {
-        let size = CANVAS_SIZE as f32;
-        for py in 0..CANVAS_SIZE {
-            for px in 0..CANVAS_SIZE {
-                let px_f = px as f32 + 0.5;
-                let py_f = py as f32 + 0.5;
-                let d = Self::rounded_rect_sdf(px_f, py_f, 0.0, 0.0, size, size, r);
-                if d >= 0.0 { continue; }
-                let dist_from_edge = -d;
-                if dist_from_edge > blur { continue; }
-                let dir = (px_f / size + py_f / size) * 0.5;
-                let t = (dist_from_edge / blur).clamp(0.0, 1.0);
-                let a = (1.0 - t) * dir * opacity;
-                if a < 0.01 { continue; }
-                Self::blend_pixel(img, px, py, Rgba([0, 0, 0, (a * 255.0) as u8]));
-            }
-        }
-    }
-
-    fn draw_edge_highlight_static(img: &mut RgbaImage, r: f32, w: f32, opacity: f32) {
-        let size = CANVAS_SIZE as f32;
-        for py in 0..CANVAS_SIZE {
-            for px in 0..CANVAS_SIZE {
-                let d = Self::rounded_rect_sdf(px as f32 + 0.5, py as f32 + 0.5, 0.0, 0.0, size, size, r);
-                if d <= 0.0 && d >= -w {
-                    let t = (-d / w).clamp(0.0, 1.0);
-                    let ny = py as f32 / size;
-                    let dir = 1.0 - ny;
-                    let a = t * dir * opacity;
-                    if a > 0.01 {
-                        Self::blend_pixel(img, px, py, Rgba([255, 255, 255, (a * 255.0) as u8]));
-                    }
-                }
-            }
-        }
-    }
-
-    fn apply_corner_radius_static(img: &mut RgbaImage, r: f32) {
-        let size = CANVAS_SIZE as f32;
-        for py in 0..CANVAS_SIZE {
-            for px in 0..CANVAS_SIZE {
-                if !Self::is_in_rounded_rect(px as f32, py as f32, 0.0, 0.0, size, size, r) {
-                    img.put_pixel(px, py, Rgba([0, 0, 0, 0]));
-                }
-            }
-        }
-    }
-
     /// Render the icon and return the raw image buffer.
     pub fn render(&self) -> RgbaImage {
         let mut img = RgbaImage::from_pixel(CANVAS_SIZE, CANVAS_SIZE, Rgba([0, 0, 0, 0]));
@@ -883,26 +1349,30 @@ impl IconCanvas {
             self.draw_layer(&mut img, layer);
         }
 
-        // 3. Post-processing (before corner mask)
+        // 3./4. Post-processing: frosted wash, then light-steered glass
+        // effects (specular rim, inner depth, edge highlight) and corner mask.
         if self.frosted_opacity > 0.0 {
             self.draw_frosted(&mut img);
         }
-        if self.specular_opacity > 0.0 && self.corner_radius > 0.0 {
-            self.draw_specular(&mut img);
-        }
-        if self.inner_depth_blur > 0.0 && self.inner_depth_opacity > 0.0 && self.corner_radius > 0.0 {
-            self.draw_inner_depth(&mut img);
-        }
-        if self.edge_highlight_width > 0.0 && self.corner_radius > 0.0 {
-            self.draw_edge_highlight(&mut img);
-        }
-
-        // 4. Apply corner radius mask
-        if self.corner_radius > 0.0 {
-            self.apply_corner_radius(&mut img);
-        }
+        Self::apply_depth_effects(&mut img, &self.depth_options());
 
         img
+    }
+
+    /// Collect the canvas-level effect state into [`DepthOptions`] so the
+    /// builder and the file-processing pipeline share one implementation.
+    fn depth_options(&self) -> DepthOptions {
+        DepthOptions {
+            corner_radius: self.corner_radius,
+            shadow: None,
+            inner_depth_blur: self.inner_depth_blur,
+            inner_depth_opacity: if self.inner_depth_blur > 0.0 { self.inner_depth_opacity } else { 0.0 },
+            specular_opacity: self.specular_opacity,
+            edge_highlight_width: self.edge_highlight_width,
+            edge_highlight_opacity: self.edge_highlight_opacity,
+            light_x: self.light_x,
+            light_y: self.light_y,
+        }
     }
 
     // ── Background rendering ───────────────────────────────
@@ -973,8 +1443,19 @@ impl IconCanvas {
         let sy = layer.y + shadow.offset_y;
 
         match &layer.content {
-            LayerContent::Icon(_) => {
-                self.draw_blurred_rect(img, sx, sy, layer.width, layer.height, shadow.blur, shadow_color);
+            LayerContent::Icon(symbol) => {
+                // Glyph-shaped shadow: distance field of the actual symbol
+                // silhouette instead of a blurred rectangle.
+                if let Some((sprite, sx, sy)) = self.icon_sprite(layer, symbol) {
+                    Self::paint_distance_shadow(
+                        img,
+                        &sprite,
+                        sx as i64 + shadow.offset_x.round() as i64,
+                        sy as i64 + shadow.offset_y.round() as i64,
+                        shadow.blur,
+                        shadow_color,
+                    );
+                }
             }
             LayerContent::Rect { width, height, .. } => {
                 self.draw_blurred_rect(img, sx, sy, *width, *height, shadow.blur, shadow_color);
@@ -1090,44 +1571,59 @@ impl IconCanvas {
         }
     }
 
+    /// Load an SF Symbol PNG and fit it inside the padded layer box,
+    /// preserving its aspect ratio (contain fit, centered). Returns the
+    /// positioned sprite ready for compositing.
+    fn icon_sprite(&self, layer: &Layer, symbol: &SFSymbol) -> Option<(RgbaImage, u32, u32)> {
+        let full = unsafe { PathBuf::from(ASSETS_DIR).join(format!("{}.png", symbol.name())) };
+        let icon_img = image::open(&full).ok()?;
+        let p = self.padding;
+        let box_w = (layer.width - p * 2.0).max(1.0);
+        let box_h = (layer.height - p * 2.0).max(1.0);
+        let iw = icon_img.width() as f32;
+        let ih = icon_img.height() as f32;
+        let scale = (box_w / iw).min(box_h / ih);
+        let resized = icon_img.resize(
+            ((iw * scale).round() as u32).max(1),
+            ((ih * scale).round() as u32).max(1),
+            image::imageops::FilterType::Lanczos3,
+        );
+        let x = (layer.x + p + (box_w - resized.width() as f32) / 2.0).round().max(0.0) as u32;
+        let y = (layer.y + p + (box_h - resized.height() as f32) / 2.0).round().max(0.0) as u32;
+        Some((resized.to_rgba8(), x, y))
+    }
+
     fn draw_icon(&self, img: &mut RgbaImage, layer: &Layer, symbol: &SFSymbol) {
-        let name = symbol.name();
-        let full = unsafe { PathBuf::from(ASSETS_DIR).join(format!("{}.png", name)) };
-        if let Ok(icon_img) = image::open(&full) {
-            let p = self.padding;
-            let padded_x = layer.x + p;
-            let padded_y = layer.y + p;
-            let padded_w = (layer.width - p * 2.0).max(1.0);
-            let padded_h = (layer.height - p * 2.0).max(1.0);
-            let resized = icon_img.resize_to_fill(padded_w as u32, padded_h as u32, image::imageops::FilterType::Lanczos3);
-            let rgba = resized.to_rgba8();
-            let h = rgba.height();
-            let overlay = if let Some(s) = &layer.inner_shadow {
-                Some(Self::inner_shadow_overlay(&rgba, s))
-            } else {
-                None
-            };
-            for (px, py, pixel) in rgba.enumerate_pixels() {
-                let dx = padded_x as u32 + px;
-                let dy = padded_y as u32 + py;
-                if dx < CANVAS_SIZE && dy < CANVAS_SIZE {
-                    let mut p = *pixel;
-                    if let Some(tint) = &layer.fill {
-                        p = Self::tint_pixel(p, *tint);
-                    }
-                    if let Some(gradient) = &layer.gradient {
-                        let t = py as f32 / h as f32;
-                        let c = Self::sample_gradient(gradient, t.clamp(0.0, 1.0));
-                        p = Self::tint_pixel(p, c);
-                    }
-                    p[3] = (p[3] as f32 * layer.opacity) as u8;
-                    Self::blend_pixel(img, dx, dy, p);
+        let Some((rgba, ox, oy)) = self.icon_sprite(layer, symbol) else { return; };
+        let h = rgba.height();
+        let overlay = if let Some(s) = &layer.inner_shadow {
+            Some(Self::inner_shadow_overlay(&rgba, s))
+        } else {
+            None
+        };
+        for (px, py, pixel) in rgba.enumerate_pixels() {
+            let dx = ox + px;
+            let dy = oy + py;
+            if dx < CANVAS_SIZE && dy < CANVAS_SIZE {
+                let mut p = *pixel;
+                if let Some(tint) = &layer.fill {
+                    p = Self::tint_pixel(p, *tint);
                 }
+                if let Some(gradient) = &layer.gradient {
+                    let t = py as f32 / h as f32;
+                    let c = Self::sample_gradient(gradient, t.clamp(0.0, 1.0));
+                    p = Self::tint_pixel(p, c);
+                }
+                if let Some(m) = &layer.tint_matrix {
+                    p = Self::apply_matrix_to_pixel(m, p);
+                }
+                p[3] = (p[3] as f32 * layer.opacity).round().clamp(0.0, 255.0) as u8;
+                Self::blend_pixel(img, dx, dy, p);
             }
-            // Draw inner shadow on top of the icon fill.
-            if let Some(ov) = &overlay {
-                Self::blend_overlay(img, ov, layer.x as u32, layer.y as u32);
-            }
+        }
+        // Draw inner shadow on top of the icon fill.
+        if let Some(ov) = &overlay {
+            Self::blend_overlay(img, ov, ox, oy);
         }
     }
 
@@ -1142,7 +1638,10 @@ impl IconCanvas {
                     if let Some(tint) = &layer.fill {
                         p = Self::tint_pixel(p, *tint);
                     }
-                    p[3] = (p[3] as f32 * layer.opacity) as u8;
+                    if let Some(m) = &layer.tint_matrix {
+                        p = Self::apply_matrix_to_pixel(m, p);
+                    }
+                    p[3] = (p[3] as f32 * layer.opacity).round().clamp(0.0, 255.0) as u8;
                     Self::blend_pixel(img, dx, dy, p);
                 }
             }
@@ -1171,7 +1670,7 @@ impl IconCanvas {
                         let py = bounds.min.y + gy as f32;
                         if px >= 0.0 && py >= 0.0 && px < CANVAS_SIZE as f32 && py < CANVAS_SIZE as f32 {
                             let alpha = coverage;
-                            let pixel_color = if let Some(gradient) = &layer.gradient {
+                            let mut pixel_color = if let Some(gradient) = &layer.gradient {
                                 let t = (py - layer.y) / layer.height;
                                 Self::sample_gradient(gradient, t.clamp(0.0, 1.0))
                             } else if let Some(color) = &layer.fill {
@@ -1179,10 +1678,14 @@ impl IconCanvas {
                             } else {
                                 Color::WHITE
                             };
+                            if let Some(m) = &layer.tint_matrix {
+                                let (r, g, b, _) = m.apply(pixel_color.r, pixel_color.g, pixel_color.b, 1.0);
+                                pixel_color = Color::new(r, g, b, pixel_color.a);
+                            }
                             let rgba = Rgba([
-                                (pixel_color.r * 255.0) as u8,
-                                (pixel_color.g * 255.0) as u8,
-                                (pixel_color.b * 255.0) as u8,
+                                (pixel_color.r * 255.0).round() as u8,
+                                (pixel_color.g * 255.0).round() as u8,
+                                (pixel_color.b * 255.0).round() as u8,
                                 (alpha * layer.opacity * 255.0) as u8,
                             ]);
                             Self::blend_pixel(img, px as u32, py as u32, rgba);
@@ -1275,15 +1778,19 @@ impl IconCanvas {
     // ── Helpers ────────────────────────────────────────────
 
     fn resolve_fill_pixel(&self, layer: &Layer, _px: f32, py: f32, _x: f32, y: f32, _w: f32, h: f32) -> Rgba<u8> {
-        if let Some(gradient) = &layer.gradient {
+        let mut pixel = if let Some(gradient) = &layer.gradient {
             let t = (py - y) / h;
             let c = Self::sample_gradient(gradient, t.clamp(0.0, 1.0));
             Self::color_to_rgba(Color::new(c.r, c.g, c.b, c.a * layer.opacity))
         } else if let Some(color) = &layer.fill {
             Self::color_to_rgba(Color::new(color.r, color.g, color.b, color.a * layer.opacity))
         } else {
-            Rgba([255, 255, 255, (255.0 * layer.opacity) as u8])
+            Rgba([255, 255, 255, (255.0 * layer.opacity).round() as u8])
+        };
+        if let Some(m) = &layer.tint_matrix {
+            pixel = Self::apply_matrix_to_pixel(m, pixel);
         }
+        pixel
     }
 
     fn color_to_rgba(c: Color) -> Rgba<u8> {
@@ -1295,6 +1802,23 @@ impl IconCanvas {
         ])
     }
 
+    /// Run a [`TintMatrix`] over one straight-alpha pixel.
+    fn apply_matrix_to_pixel(m: &TintMatrix, p: Rgba<u8>) -> Rgba<u8> {
+        if p[3] == 0 { return p; }
+        let (r, g, b, a) = m.apply(
+            p[0] as f32 / 255.0,
+            p[1] as f32 / 255.0,
+            p[2] as f32 / 255.0,
+            p[3] as f32 / 255.0,
+        );
+        Rgba([
+            (r * 255.0).round() as u8,
+            (g * 255.0).round() as u8,
+            (b * 255.0).round() as u8,
+            (a * 255.0).round() as u8,
+        ])
+    }
+
     fn tint_pixel(pixel: Rgba<u8>, tint: Color) -> Rgba<u8> {
         // Use alpha channel as mask, replace RGB with tint color
         let alpha = pixel[3] as f32 / 255.0;
@@ -1302,10 +1826,10 @@ impl IconCanvas {
             return Rgba([0, 0, 0, 0]);
         }
         Rgba([
-            (tint.r * 255.0) as u8,
-            (tint.g * 255.0) as u8,
-            (tint.b * 255.0) as u8,
-            (alpha * tint.a * 255.0) as u8,
+            (tint.r * 255.0).round() as u8,
+            (tint.g * 255.0).round() as u8,
+            (tint.b * 255.0).round() as u8,
+            (alpha * tint.a * 255.0).round() as u8,
         ])
     }
 
@@ -1418,42 +1942,6 @@ impl IconCanvas {
         true
     }
 
-    /// Mask the canvas to a rounded rectangle shape.
-    fn apply_corner_radius(&self, img: &mut RgbaImage) {
-        let r = self.corner_radius;
-        let size = CANVAS_SIZE as f32;
-        for py in 0..CANVAS_SIZE {
-            for px in 0..CANVAS_SIZE {
-                if !Self::is_in_rounded_rect(px as f32, py as f32, 0.0, 0.0, size, size, r) {
-                    img.put_pixel(px, py, Rgba([0, 0, 0, 0]));
-                }
-            }
-        }
-    }
-
-    /// Directional edge highlight — bright on the top & left edges,
-    /// fades to zero toward the bottom. Light from above.
-    fn draw_edge_highlight(&self, img: &mut RgbaImage) {
-        let w = self.edge_highlight_width;
-        let opacity = self.edge_highlight_opacity;
-        let size = CANVAS_SIZE as f32;
-        let r = self.corner_radius;
-        for py in 0..CANVAS_SIZE {
-            for px in 0..CANVAS_SIZE {
-                let d = Self::rounded_rect_sdf(px as f32 + 0.5, py as f32 + 0.5, 0.0, 0.0, size, size, r);
-                if d <= 0.0 && d >= -w {
-                    let t = (-d / w).clamp(0.0, 1.0);
-                    let ny = py as f32 / size;
-                    let dir = 1.0 - ny;
-                    let a = t * dir * opacity;
-                    if a > 0.01 {
-                        Self::blend_pixel(img, px, py, Rgba([255, 255, 255, (a * 255.0) as u8]));
-                    }
-                }
-            }
-        }
-    }
-
     /// Frosted-glass overlay — blends white over every opaque pixel so
     /// colours look lighter, as if viewed through frosted glass.
     fn draw_frosted(&self, img: &mut RgbaImage) {
@@ -1465,71 +1953,6 @@ impl IconCanvas {
                 Self::blend_pixel_in_place(pixel, Rgba([255, 255, 255, white_a]));
             }
         }
-    }
-
-    /// Glossy specular highlight: a bright rim along the top & left edges
-    /// that fades sharply inward — light source from above-left.
-    /// Only the very edge band gets the sheen, not the whole canvas.
-    fn draw_specular(&self, img: &mut RgbaImage) {
-        let opacity = self.specular_opacity;
-        let size = CANVAS_SIZE as f32;
-        let r = self.corner_radius;
-        let band = size * 0.035;
-        for py in 0..CANVAS_SIZE {
-            for px in 0..CANVAS_SIZE {
-                if !Self::is_in_rounded_rect(px as f32, py as f32, 0.0, 0.0, size, size, r) {
-                    continue;
-                }
-                let d = Self::rounded_rect_sdf(px as f32 + 0.5, py as f32 + 0.5, 0.0, 0.0, size, size, r);
-                if d >= 0.0 { continue; }
-                let dist_from_edge = -d;
-                if dist_from_edge > band { continue; }
-                let edge_t = 1.0 - (dist_from_edge / band);
-                let edge_fade = edge_t * edge_t;
-                let ny = py as f32 / size;
-                let dir = 1.0 - ny;
-                let a = edge_fade * dir * opacity;
-                if a < 0.01 { continue; }
-                Self::blend_pixel(img, px, py, Rgba([255, 255, 255, (a * 255.0) as u8]));
-            }
-        }
-    }
-
-    /// Raised-button depth: directional inner shadow that intensifies
-    /// toward the bottom-right corner (light source from top-left).
-    /// Uses the rounded-rect SDF for the edge distance, modulated by a
-    /// directional factor so only the bottom-right band darkens.
-    fn draw_inner_depth(&self, img: &mut RgbaImage) {
-        let blur = self.inner_depth_blur;
-        let opacity = self.inner_depth_opacity;
-        let size = CANVAS_SIZE as f32;
-        let r = self.corner_radius;
-        for py in 0..CANVAS_SIZE {
-            for px in 0..CANVAS_SIZE {
-                let px_f = px as f32 + 0.5;
-                let py_f = py as f32 + 0.5;
-                let d = Self::rounded_rect_sdf(px_f, py_f, 0.0, 0.0, size, size, r);
-                if d >= 0.0 { continue; }
-                let dist_from_edge = -d;
-                if dist_from_edge > blur { continue; }
-                // Directional: 0 at top-left, 1 at bottom-right.
-                let dir = (px_f / size + py_f / size) * 0.5;
-                let t = (dist_from_edge / blur).clamp(0.0, 1.0);
-                let a = (1.0 - t) * dir * opacity;
-                if a < 0.01 { continue; }
-                Self::blend_pixel(img, px, py, Rgba([0, 0, 0, (a * 255.0) as u8]));
-            }
-        }
-    }
-
-    /// Signed distance from a point to a rounded rect (negative = inside).
-    fn rounded_rect_sdf(px: f32, py: f32, x: f32, y: f32, w: f32, h: f32, r: f32) -> f32 {
-        let r = r.min(w / 2.0).min(h / 2.0);
-        let cx = (px - (x + r)).clamp(0.0, w - 2.0 * r) + x + r;
-        let cy = (py - (y + r)).clamp(0.0, h - 2.0 * r) + y + r;
-        let dx = px - cx;
-        let dy = py - cy;
-        (dx * dx + dy * dy).sqrt() - r
     }
 
     /// Blend src onto dst in-place (src-over compositing).

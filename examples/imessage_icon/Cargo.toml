@@ -4,4 +4,4 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-CoreIcon = { path = "../.." }
+CoreIcon = { path = "../..", package = "coreicon" }

@@ -108,10 +108,20 @@ impl SFSymbolView {
 }
 
 // Prelude
-pub mod prelude { pub use crate::{SFSymbol, SFSymbolView, Color, Gradient, GradientStop, GradientDirection, TintMode, ASSETS_DIR}; }
+pub mod prelude { pub use crate::{SFSymbol, SFSymbolView, Color, Gradient, GradientStop, GradientDirection, TintMode, TintMatrix, ASSETS_DIR}; }
 
 // Icon generator
 pub mod generator;
+
+// Color matrix recoloring
+pub mod tint;
+pub use tint::TintMatrix;
+
+// TontooOS octopus branding icons
+pub mod octopus;
+
+// OS version specific assets
+pub mod os_version;
 
 // Generated symbol constants.
 pub const _0_CIRCLE: SFSymbol = SFSymbol { name: "0.circle" };
@@ -8458,3 +8468,5 @@ pub const ALL: &[SFSymbol] = &[
     ZZZ,
 ];
 
+
+mod ffi;

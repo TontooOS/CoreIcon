@@ -51,9 +51,11 @@ post-processing effects start at zero.
 | `background` | `background(bg: Background) -> Self` | Fill the entire canvas |
 | `corner_radius` | `corner_radius(r: f32) -> Self` | Round the canvas edges (`0` = square) |
 | `frosted` | `frosted(opacity: f32) -> Self` | White glass wash, `0.0`–`1.0` |
-| `specular` | `specular(opacity: f32) -> Self` | Glossy top-left highlight |
-| `inner_depth` | `inner_depth(blur: f32, opacity: f32) -> Self` | Bottom-right inner shadow |
+| `specular` | `specular(opacity: f32) -> Self` | Glossy rim highlight on light-facing edges |
+| `inner_depth` | `inner_depth(blur: f32, opacity: f32) -> Self` | Inner shadow on the side away from the light |
 | `edge_highlight` | `edge_highlight(width: f32, opacity: f32) -> Self` | Bright edge line inside the round rect |
+| `light_direction` | `light_direction(x: f32, y: f32) -> Self` | Light source for `specular`, `inner_depth`, `edge_highlight`; default top-left (`-0.6, -0.8`) |
+| `glass` | `glass() -> Self` | One-call Liquid Glass preset (see below) |
 | `layer` | `layer(layer: Layer) -> Self` | Append a layer (drawn in order) |
 
 ### Rendering
@@ -70,8 +72,23 @@ The render order is:
 
 1. Background fill
 2. All layers (in order: `shadow`, then element content)
-3. Post-processing: frosted, specular, inner depth, edge highlight
-4. Corner radius mask (everything outside the rounded rect becomes transparent)
+3. Frosted wash (if enabled)
+4. Light-steered glass effects: specular rim, inner depth, edge highlight
+5. Corner radius mask (everything outside the rounded rect becomes transparent)
+
+### Liquid Glass preset
+
+`.glass()` applies the iOS-style combination in one call:
+
+```rust
+let icon = IconCanvas::new()
+    .glass()          // corner_radius 256, frosted 0.16, specular 0.30,
+    // ... layers ... // inner_depth(36, 0.32), edge_highlight(6, 0.40)
+    .background(Background::color(Color::from_hex("#2255AA").unwrap()))
+;
+```
+
+Every value can be overridden by calling the individual builders afterwards.
 
 ## Background
 
@@ -103,6 +120,7 @@ pub struct Layer {
     pub height: f32,
     pub fill: Option<Color>,
     pub gradient: Option<Gradient>,
+    pub tint_matrix: Option<TintMatrix>,
     pub opacity: f32,
     pub shadow: Option<Shadow>,
     pub inner_shadow: Option<Shadow>,
@@ -118,6 +136,7 @@ pub struct Layer {
 | `.size(w, h)` | Element dimensions |
 | `.tint(c)` | Solid color fill |
 | `.gradient(g)` | Gradient fill (overrides tint) |
+| `.tint_matrix(m)` | Color-matrix recolor applied after fill/gradient (see [TintMatrix.md](TintMatrix.md)) |
 | `.opacity(o)` | Clamped to `[0.0, 1.0]` |
 | `.shadow(s)` | Shadow drawn before the element |
 | `.inner_shadow(s)` | Shadow drawn inside the element's alpha |
@@ -139,7 +158,7 @@ pub enum LayerContent {
 
 | Variant | Behavior |
 |---|---|
-| `Icon(SFSymbol)` | Loads the PNG from `ASSETS_DIR`, resizes to the layer size |
+| `Icon(SFSymbol)` | Loads the PNG from `ASSETS_DIR`, aspect-fit (contain) into the padded layer box, centered - non-square symbols are no longer stretched |
 | `Rect` | Fills a rounded rectangle; `corner_radius` is the rect's own radius |
 | `Circle` | Fills a circle of the given diameter |
 | `Image` | Loads a raster image from the given file path |
@@ -175,9 +194,11 @@ pub struct Shadow {
 | `.color(c)` | Shadow color |
 | `.opacity(o)` | Clamped to `[0.0, 1.0]` |
 
-Shadows are drawn behind their layer element, respecting its shape (rect or
-circle). For `Icon`, `Image` and `Text` layers, the shadow is drawn as a
-blurred rectangle matching the layer bounds.
+Shadows are drawn behind their layer element. For `Rect` and `Circle` layers
+the shadow follows the shape; for `Icon` layers it is glyph-shaped - computed
+from a chamfer distance transform of the actual symbol silhouette, so the
+shadow matches the artwork instead of a bounding box. The transform is `O(n)`
+regardless of blur radius.
 
 ## Inner Shadow
 
@@ -194,11 +215,17 @@ values are greater than zero.
 | Effect | Parameters | Description |
 |---|---|---|
 | Frosted | `opacity` | Blends white over every opaque pixel; simulates frosted glass |
-| Specular | `opacity` | Bright gradient from the top-left corner; simulates glossy glass |
-| Inner Depth | `blur`, `opacity` | Darkens the inside of the canvas toward the bottom-right |
-| Edge Highlight | `width`, `opacity` | Bright line along the inside edge of the rounded rect |
+| Specular | `opacity` | Bright rim on the edges facing the light (rim lighting via the rounded-rect surface normal), fading inward over ~3.5% of the canvas |
+| Inner Depth | `blur`, `opacity` | Darkens the inside edge on the side away from the light |
+| Edge Highlight | `width`, `opacity` | Bright line along the inside edge, strongest where the edge faces the light |
 
-For the iOS 26 Liquid Glass look, combine all four:
+All three light-steered effects share `light_direction(x, y)`. The vector
+points toward the light source; the default is top-left (`-0.6, -0.8`). Because
+the specular band uses the surface normal of the rounded rect, the sheen wraps
+around corners like real glass.
+
+For the iOS 26 Liquid Glass look, either combine them manually or use
+`.glass()`.
 
 ```rust
 let icon = IconCanvas::new()
@@ -253,10 +280,117 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+## Image Processing Core
+
+All file-based entry points (`add_depth_to_image`, `change_color`,
+`dark_light_mode`, `set_background_color`) are thin wrappers over one
+pipeline. The pipeline is also available directly:
+
+### `process_file` / `process_image`
+
+```rust
+pub fn process_file(
+    input_path: impl AsRef<Path>,
+    options: &ProcessOptions,
+) -> Result<RgbaImage, Box<dyn std::error::Error>>
+pub fn process_image(src: &RgbaImage, options: &ProcessOptions) -> RgbaImage
+```
+
+`process_file` loads and scales the source to exactly 1024x1024, then runs the
+same pipeline as `process_image`. Pipeline order:
+
+1. Background replacement (flood fill from the edges)
+2. Recolor (`RecolorOptions`)
+3. Shadow (distance transform) -> content -> specular -> inner depth ->
+   edge highlight
+4. Corner radius mask
+
+```rust
+pub struct ProcessOptions {
+    pub recolor: Option<RecolorOptions>,
+    pub background_replace: Option<Color>,
+    pub depth: DepthOptions,
+    pub protect_background: bool,
+}
+```
+
+`protect_background: true` excludes the flood-filled background region from
+recoloring (computed with strict thresholds so gray artwork is still tinted).
+This is how `AppIcon` Light+tint colors monochrome artwork while keeping the
+original background.
+
+### `DepthOptions`
+
+Builder for all depth effects; defaults switch every effect off.
+
+| Method | Description |
+|---|---|
+| `DepthOptions::new(corner_radius)` | Start with a corner radius, effects off |
+| `.shadow(s)` | Glyph-shaped drop shadow (`Shadow`) |
+| `.inner_depth(blur, opacity)` | Inner bevel away from the light |
+| `.specular(opacity)` | Rim highlight toward the light |
+| `.edge_highlight(width, opacity)` | Bright edge line |
+| `.light_direction(x, y)` | Light source vector, default top-left |
+
+### `recolor_image`
+
+```rust
+pub fn recolor_image(src: &RgbaImage, options: &RecolorOptions) -> RgbaImage
+```
+
+Pure recoloring without depth effects or canvas compositing.
+
+```rust
+pub enum RecolorMode {
+    Colorize,
+    AccentLuma,
+    Replace,
+    Shaded,
+}
+
+pub struct RecolorOptions {
+    pub tint: Color,
+    pub intensity: f32,
+    pub mode: RecolorMode,
+    pub neutral_threshold: f32,
+    pub protect: Option<Color>,
+    pub protect_tolerance: f32,
+    pub remap_from: Option<Color>,
+    pub remap_to: Option<Color>,
+    pub remap_tolerance: f32,
+}
+```
+
+| Mode | Algorithm |
+|---|---|
+| `Colorize` | HSL colorize: hue + saturation from `tint`, lightness preserved per pixel |
+| `AccentLuma` | Apple accent tint: `out.rgb = tint.rgb * (0.2*luma + 0.8*value)` |
+| `Replace` | Flat template replacement: RGB becomes `tint`, alpha kept |
+| `Shaded` | Luminance-graded replacement: pixel becomes `tint * (lightness / tint_lightness)` clamped to 1.0 - whites map to the full tint, blacks stay black |
+
+`neutral_threshold` only applies to `Colorize`; pure white/black carry no hue
+information and can never be tinted by HSL colorize - use `Shaded` when such
+pixels must be recolored too. `protect(color)` skips pixels within
+`protect_tolerance` (Euclidean RGB, 0.0-1.0 space, default `0.12`) of the
+given color - typically the flat background color swapped earlier in the same
+`ProcessOptions` run.
+
+`remap(from, to)` replaces pixels within `remap_tolerance` of `from` with `to`
+outright, before the mode is applied. Use it for interior cutouts that should
+follow the swapped background color instead of the artwork color.
+
+`intensity` blends linearly between original and recolored (`0.0` = original).
+In `Colorize` mode pixels with saturation at or below `neutral_threshold`
+(default `0.05`) keep their original color, protecting grays / white / black.
+The conversion works on straight alpha with proper rounding, so anti-aliased
+edges no longer produce dark fringes.
+
 ## Add Depth to Existing Images
 
 Two static methods on `IconCanvas` let you apply depth effects to any existing
-image file (JPG, PNG, etc.) without building layers manually.
+image file (JPG, PNG, etc.) without building layers manually. Both delegate to
+the processing core described above; shadows use a distance transform of the
+image silhouette.
 
 ### `add_depth_to_image`
 
@@ -371,7 +505,10 @@ pub fn change_color(
 
 Loads the source image, blends each pixel toward `tint_color` based on
 `intensity`, then applies depth effects on top. Returns the processed
-`RgbaImage`.
+`RgbaImage`. This is a convenience wrapper over
+`process_file` with `RecolorMode::Colorize` and the neutral threshold fixed at
+`0.05`; use [`recolor_image`](#recolor_image) or [`ProcessOptions`] to pick a
+different mode or threshold.
 
 Colorization happens in HSL space: hue and saturation are taken from
 `tint_color` while each pixel's lightness is preserved. Pixels with near-zero
@@ -489,12 +626,36 @@ pub fn dark_light_mode(
 Loads the source image, detects the background region with a flood fill seeded
 from the image edges, then replaces every background pixel with a solid color
 (see `IconMode`). Foreground pixels are kept as-is. Depth effects are applied
-on top.
+on top. Implemented via [`set_background_color`](#set_background_color).
 
 The flood fill starts from all four border edges. A 4-connected neighbor is
 added to the background region when the Euclidean RGB distance to the current
 pixel is below the threshold `0.22`; any pixel not reached by the fill is
 treated as foreground.
+
+### `set_background_color`
+
+```rust
+pub fn set_background_color(
+    input_path: impl AsRef<Path>,
+    target: Color,
+    depth: DepthOptions,
+) -> Result<RgbaImage, Box<dyn std::error::Error>>
+```
+
+Generalization of `dark_light_mode`: replaces the flood-filled background with
+any `Color` instead of the two fixed presets.
+
+```rust
+use CoreIcon::generator::{DepthOptions, IconCanvas};
+use CoreIcon::Color;
+
+let out = IconCanvas::set_background_color(
+    "icon.png",
+    Color::from_hex("#22FF88").unwrap(),
+    DepthOptions::new(220.0),
+)?;
+```
 
 ### `dark_light_mode_and_save`
 
@@ -540,6 +701,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Cross References
 
+- [TintMatrix.md](TintMatrix.md) - color-matrix recoloring used by `Layer.tint_matrix` and `RecolorOptions`
 - [SFSymbol.md](SFSymbol.md) – symbol constants rendered via `LayerContent::Icon`
 - [Color.md](Color.md) – fills, tints and shadows
 - [Gradient.md](Gradient.md) – background and layer gradients

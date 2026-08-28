@@ -1,8 +1,7 @@
 [package]
-name = "depth-test"
+name = "app-icon-demo"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
 CoreIcon = { path = "../..", package = "coreicon" }
-image = "0.25"

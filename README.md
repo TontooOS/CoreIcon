@@ -12,7 +12,14 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-coreicon = { path = "/Library/System/coreicon" }
+sdk = { path = "/Library/System/sdk", features = ["CoreIcon"] }
+```
+
+Then at the crate root:
+
+```rust
+sdk::preinclude!();
+use CoreIcon::{ /* ... */ };
 ```
 
 ## License
