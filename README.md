@@ -15,13 +15,6 @@ Add to your `Cargo.toml`:
 sdk = { path = "/Library/System/sdk", features = ["CoreIcon"] }
 ```
 
-Then at the crate root:
-
-```rust
-sdk::preinclude!();
-use CoreIcon::{ /* ... */ };
-```
-
 ## License
 
 TCL v26.1
