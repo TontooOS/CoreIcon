@@ -63,6 +63,23 @@ See [Generator.md](Generator.md), [Color.md](Color.md) and
 
 ## Changelog
 
+- 2026-09-09: Halo-free swaps + glyph depth: `replace_background`
+  decontaminates chromatic fringe over the new color (no light-blue halo
+  around kept glyphs); new `DepthOptions::artwork_shadow` (file pipeline)
+  casts the flood-mask foreground onto the background, wired into
+  `default_app_icon_depth()` and `apple_liquid_glass()`.
+- 2026-09-09: Fixed dark-mode white remap eating foreground glyphs:
+  new `RecolorOptions::remap_max_fraction` with connected-component gating;
+  `AppIcon` dark paths use `DARK_REMAP_MAX_FRACTION` (`0.10`) so small
+  cutouts (VS Code triangle ~6.5%) follow the dark background while large
+  white artwork (speech bubble ~17.9%) survives.
+- 2026-09-09: Apple-strong Liquid Glass for app icons: new
+  `DepthOptions` / `IconCanvas` effects `gloss`, `vibrancy` and `shade`;
+  `APPLE_CORNER_RADIUS` (`232.0`) plus `apple_liquid_glass()` preset;
+  `default_app_icon_depth()` and `.glass()` retuned to Apple levels (dual
+  ambient + key shadow, top gloss + diagonal sheen, gradient edge stroke,
+  bottom shade, AA corner mask); `DARK_BACKGROUND` aligned to TontooOS dark
+  `#1d1d1d`.
 - 2026-08-28: Added `Octopus` module (`use_octopus`, `OctopusVariant`, `OctopusIcon`) with `assets/TontooOS` branding PNGs and `Shaded` tint; added `OsVersion` module (`use_osversionicons`, `OsVersionIcon`) for `OSVersionAssets/<version>/<name>` (shipped `26.1.0`: `TontooOS_Icon.png`, `seal.png`, `ocean.jpg`) plus `available_versions`/`available_icons` discovery helpers.
 - 2026-08-25: `Colorize` with `neutral_threshold(0)` now tints pure grays;
   added `ProcessOptions::protect_background` so Light+tint recolors monochrome

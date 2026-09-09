@@ -63,6 +63,12 @@ pub struct RecolorOptions {
     pub remap_to: Option<Color>,
     /// Euclidean RGB distance (0.0–1.0 space) for the remap rule.
     pub remap_tolerance: f32,
+    /// When set, the remap only applies to connected components smaller
+    /// than this fraction of the image area (`0.0`–`1.0`). `None` (default)
+    /// remaps every matching pixel. Use e.g. `Some(0.10)` so small holes /
+    /// cutouts follow the swapped background while large foreground shapes
+    /// (white glyphs, bubbles) survive.
+    pub remap_max_fraction: Option<f32>,
 }
 
 impl RecolorOptions {
@@ -77,6 +83,7 @@ impl RecolorOptions {
             remap_from: None,
             remap_to: None,
             remap_tolerance: 0.12,
+            remap_max_fraction: None,
         }
     }
     pub fn mode(mut self, mode: RecolorMode) -> Self { self.mode = mode; self }
@@ -91,13 +98,19 @@ impl RecolorOptions {
         self
     }
     pub fn remap_tolerance(mut self, t: f32) -> Self { self.remap_tolerance = t.clamp(0.001, 1.0); self }
+    /// Only remap connected components smaller than `fraction` of the image
+    /// area. Small holes follow the background, large glyphs are kept.
+    pub fn remap_max_fraction(mut self, fraction: f32) -> Self {
+        self.remap_max_fraction = Some(fraction.clamp(0.0, 1.0));
+        self
+    }
 }
 
 /// Depth-effect settings shared by the file-processing entry points.
 ///
 /// Mirrors the positional parameters of the legacy functions; defaults are
 /// "effect off". Light direction points toward the light source and steers
-/// specular + inner depth (default: top-left, like macOS dock glass).
+/// specular + inner depth + gloss (default: top-left, like macOS dock glass).
 #[derive(Debug, Clone)]
 pub struct DepthOptions {
     pub corner_radius: f32,
@@ -109,6 +122,19 @@ pub struct DepthOptions {
     pub edge_highlight_opacity: f32,
     pub light_x: f32,
     pub light_y: f32,
+    /// Drop shadow cast by the artwork onto the background (file pipeline
+    /// only). The foreground is the inverse of the border flood mask, so
+    /// glyphs lift off the background like Apple icons. `None` = off.
+    pub artwork_shadow: Option<Shadow>,
+    /// Full-surface top gloss (Apple Liquid Glass sheen). 0.0 = off,
+    /// 0.22-0.28 = Apple-strong. Covers the top ~45% with a soft white
+    /// gradient plus a diagonal sheen band.
+    pub gloss_opacity: f32,
+    /// Color vibrancy boost (saturation + contrast). 0.0 = off,
+    /// 0.18-0.25 = Apple-strong. Makes flat artwork pop like Apple icons.
+    pub vibrancy: f32,
+    /// Bottom inner shade (grounds the icon). 0.0 = off, 0.18-0.22 = Apple.
+    pub shade_opacity: f32,
 }
 
 impl Default for DepthOptions {
@@ -121,8 +147,12 @@ impl Default for DepthOptions {
             specular_opacity: 0.0,
             edge_highlight_width: 0.0,
             edge_highlight_opacity: 0.2,
-            light_x: -0.6,
-            light_y: -0.8,
+            light_x: -0.45,
+            light_y: -0.89,
+            artwork_shadow: None,
+            gloss_opacity: 0.0,
+            vibrancy: 0.0,
+            shade_opacity: 0.0,
         }
     }
 }
@@ -130,6 +160,8 @@ impl Default for DepthOptions {
 impl DepthOptions {
     pub fn new(corner_radius: f32) -> Self { Self { corner_radius, ..Self::default() } }
     pub fn shadow(mut self, s: Shadow) -> Self { self.shadow = Some(s); self }
+    /// Drop shadow cast by the artwork onto the background (file pipeline).
+    pub fn artwork_shadow(mut self, s: Shadow) -> Self { self.artwork_shadow = Some(s); self }
     pub fn inner_depth(mut self, blur: f32, opacity: f32) -> Self {
         self.inner_depth_blur = blur.max(0.0);
         self.inner_depth_opacity = opacity.clamp(0.0, 1.0);
@@ -141,6 +173,12 @@ impl DepthOptions {
         self.edge_highlight_opacity = opacity.clamp(0.0, 1.0);
         self
     }
+    /// Full-surface Liquid Glass gloss (top gradient + diagonal sheen).
+    pub fn gloss(mut self, opacity: f32) -> Self { self.gloss_opacity = opacity.clamp(0.0, 1.0); self }
+    /// Saturation + contrast pop for flat artwork.
+    pub fn vibrancy(mut self, v: f32) -> Self { self.vibrancy = v.clamp(0.0, 1.0); self }
+    /// Bottom inner shade that grounds the icon.
+    pub fn shade(mut self, opacity: f32) -> Self { self.shade_opacity = opacity.clamp(0.0, 1.0); self }
     pub fn light_direction(mut self, x: f32, y: f32) -> Self {
         let len = (x * x + y * y).sqrt();
         if len > 0.0001 { self.light_x = x / len; self.light_y = y / len; }
@@ -198,22 +236,54 @@ pub struct ProcessOptions {
 pub enum Appearance {
     /// Keep the original background.
     Light,
-    /// Swap the background to the dark preset `(0.13, 0.13, 0.15)`.
+    /// Swap the background to the dark preset (`#1d1d1d`, TontooOS dark).
     /// Artwork colors are preserved (a blue VS Code logo stays blue);
     /// pure-white interior cutouts follow the background color.
     Dark,
 }
 
 /// Dark background preset used by [`Appearance::Dark`].
-pub const DARK_BACKGROUND: Color = Color::new(0.13, 0.13, 0.15, 1.0);
+/// Matches the TontooOS dark background `#1d1d1d`.
+pub const DARK_BACKGROUND: Color = Color::new(0.114, 0.114, 0.114, 1.0);
 
-/// Default Liquid Glass finish for app icons.
+/// Size gate for the dark-mode white remap: connected white components
+/// smaller than this fraction of the canvas follow the dark background
+/// (holes / cutouts), larger ones are kept as foreground artwork.
+/// Measured: VS Code triangle hole ~6.5%, speech-bubble ring ~17.9%.
+pub const DARK_REMAP_MAX_FRACTION: f32 = 0.10;
+
+/// Apple-style squircle radius for 1024px icons (22.65%).
+pub const APPLE_CORNER_RADIUS: f32 = 232.0;
+
+/// Default Liquid Glass finish for app icons (Apple-strong).
+///
+/// Matches iOS 26 / macOS Tahoe icon rendering: large soft ambient shadow,
+/// wide inner bevel, bright rim specular, full-surface top gloss, vibrancy
+/// pop and a grounding bottom shade.
 pub fn default_app_icon_depth() -> DepthOptions {
-    DepthOptions::new(220.0)
-        .shadow(Shadow::new().offset(0.0, 10.0).blur(20.0).opacity(0.35))
-        .inner_depth(12.0, 0.25)
-        .specular(0.15)
-        .edge_highlight(4.0, 0.2)
+    DepthOptions::new(APPLE_CORNER_RADIUS)
+        .shadow(Shadow::new().offset(0.0, 24.0).blur(48.0).opacity(0.38))
+        .artwork_shadow(Shadow::new().offset(0.0, 18.0).blur(30.0).opacity(0.30))
+        .inner_depth(52.0, 0.38)
+        .specular(0.50)
+        .edge_highlight(3.0, 0.60)
+        .gloss(0.24)
+        .vibrancy(0.22)
+        .shade(0.20)
+}
+
+/// One-call Apple Liquid Glass finish for any [`DepthOptions`].
+/// Use when building custom pipelines that should look like `AppIcon`.
+pub fn apple_liquid_glass(corner_radius: f32) -> DepthOptions {
+    DepthOptions::new(corner_radius)
+        .shadow(Shadow::new().offset(0.0, 24.0).blur(48.0).opacity(0.38))
+        .artwork_shadow(Shadow::new().offset(0.0, 18.0).blur(30.0).opacity(0.30))
+        .inner_depth(52.0, 0.38)
+        .specular(0.50)
+        .edge_highlight(3.0, 0.60)
+        .gloss(0.24)
+        .vibrancy(0.22)
+        .shade(0.20)
 }
 
 impl IconCanvas {
@@ -341,12 +411,14 @@ impl AppIcon {
                     Some(tint) => RecolorOptions::new(tint, 1.0)
                         .mode(RecolorMode::Shaded)
                         .protect(DARK_BACKGROUND)
-                        .remap(Color::WHITE, DARK_BACKGROUND),
+                        .remap(Color::WHITE, DARK_BACKGROUND)
+                        .remap_max_fraction(DARK_REMAP_MAX_FRACTION),
                     None =>
                         // intensity 0 = pass-through recolor; only the
-                        // white->background remap takes effect.
+                        // size-gated white->background remap takes effect.
                         RecolorOptions::new(Color::WHITE, 0.0)
-                            .remap(Color::WHITE, DARK_BACKGROUND),
+                            .remap(Color::WHITE, DARK_BACKGROUND)
+                            .remap_max_fraction(DARK_REMAP_MAX_FRACTION),
                 });
             }
         }
@@ -528,6 +600,9 @@ pub struct IconCanvas {
     inner_depth_blur: f32,
     inner_depth_opacity: f32,
     specular_opacity: f32,
+    gloss_opacity: f32,
+    vibrancy: f32,
+    shade_opacity: f32,
     light_x: f32,
     light_y: f32,
 }
@@ -545,8 +620,11 @@ impl IconCanvas {
             inner_depth_blur: 0.0,
             inner_depth_opacity: 0.0,
             specular_opacity: 0.0,
-            light_x: -0.6,
-            light_y: -0.8,
+            gloss_opacity: 0.0,
+            vibrancy: 0.0,
+            shade_opacity: 0.0,
+            light_x: -0.45,
+            light_y: -0.89,
         }
     }
 
@@ -558,7 +636,8 @@ impl IconCanvas {
     pub fn padding(mut self, p: f32) -> Self { self.padding = p; self }
 
     /// Set corner radius for the entire canvas (rounded rect shape).
-    /// Use 256.0 for 25% of 1024px (iOS-style icon).
+    /// Use [`APPLE_CORNER_RADIUS`] (232.0, 22.65% of 1024px) for the
+    /// Apple Tahoe / iOS 26 squircle.
     pub fn corner_radius(mut self, r: f32) -> Self { self.corner_radius = r; self }
 
     /// Add a subtle highlight along the rounded-rect edge of the canvas.
@@ -594,26 +673,47 @@ impl IconCanvas {
         self
     }
 
-    /// Direction of the light source, used by `specular`, `inner_depth` and
-    /// `edge_highlight`. The vector points toward the light; the default is
-    /// top-left (`-0.6, -0.8`). Values are normalized internally.
+    /// Full-surface Liquid Glass gloss: soft white gradient over the top
+    /// ~45% plus a diagonal sheen band (Apple iOS 26 style). 0.0–1.0.
+    pub fn gloss(mut self, opacity: f32) -> Self {
+        self.gloss_opacity = opacity.clamp(0.0, 1.0);
+        self
+    }
+
+    /// Vibrancy boost (saturation + contrast) so flat artwork pops.
+    pub fn vibrancy(mut self, v: f32) -> Self {
+        self.vibrancy = v.clamp(0.0, 1.0);
+        self
+    }
+
+    /// Bottom inner shade that grounds the icon. 0.0–1.0.
+    pub fn shade(mut self, opacity: f32) -> Self {
+        self.shade_opacity = opacity.clamp(0.0, 1.0);
+        self
+    }
+
+    /// Direction of the light source, used by `specular`, `inner_depth`,
+    /// `edge_highlight` and `gloss`. The vector points toward the light;
+    /// the default is top-left (`-0.45, -0.89`). Values are normalized internally.
     pub fn light_direction(mut self, x: f32, y: f32) -> Self {
         let len = (x * x + y * y).sqrt();
         if len > 0.0001 { self.light_x = x / len; self.light_y = y / len; }
         self
     }
 
-    /// One-call Liquid Glass look: iOS-style corner radius plus tuned
-    /// frosted / specular / inner-depth / edge-highlight values (defaults
-    /// derived from the macOS Tahoe dock glass parameters).
+    /// One-call Apple Liquid Glass look: Tahoe-style squircle plus tuned
+    /// gloss / vibrancy / specular / inner-depth / edge-highlight / shade.
     pub fn glass(mut self) -> Self {
-        self.corner_radius = 256.0;
-        self.frosted_opacity = 0.16;
-        self.specular_opacity = 0.30;
-        self.inner_depth_blur = 36.0;
-        self.inner_depth_opacity = 0.32;
-        self.edge_highlight_width = 6.0;
-        self.edge_highlight_opacity = 0.40;
+        self.corner_radius = APPLE_CORNER_RADIUS;
+        self.frosted_opacity = 0.08;
+        self.specular_opacity = 0.50;
+        self.inner_depth_blur = 52.0;
+        self.inner_depth_opacity = 0.38;
+        self.edge_highlight_width = 3.0;
+        self.edge_highlight_opacity = 0.60;
+        self.gloss_opacity = 0.24;
+        self.vibrancy = 0.18;
+        self.shade_opacity = 0.20;
         self
     }
 
@@ -648,10 +748,12 @@ impl IconCanvas {
     /// in-memory image.
     ///
     /// Pipeline order:
-    /// 1. Background replacement (flood fill from the edges)
+    /// 1. Background replacement (flood fill + fringe decontamination)
     /// 2. Recolor ([`RecolorOptions`])
-    /// 3. Shadow -> content -> specular -> inner depth -> edge highlight
-    /// 4. Corner radius mask
+    /// 3. Dual outer shadow -> artwork shadow -> content -> vibrancy ->
+    ///    gloss + sheen -> specular -> inner depth -> bottom shade ->
+    ///    gradient edge stroke
+    /// 4. Anti-aliased corner radius mask
     pub fn process_image(src: &RgbaImage, options: &ProcessOptions) -> RgbaImage {
         let mut work = src.clone();
 
@@ -674,7 +776,10 @@ impl IconCanvas {
         let ox = ((CANVAS_SIZE - work.width().min(CANVAS_SIZE)) / 2) as i64;
         let oy = ((CANVAS_SIZE - work.height().min(CANVAS_SIZE)) / 2) as i64;
 
-        // 1. Shadow FIRST (behind the content), glyph-shaped via distance field.
+        // 1. Shadows FIRST (behind the content), glyph-shaped via distance
+        // field. Apple uses two shadows: a large soft ambient plus a tight
+        // key shadow for definition. We synthesize both from one setting
+        // when the blur is large enough.
         if let Some(shadow) = &d.shadow {
             let color = Color::new(shadow.color.r, shadow.color.g, shadow.color.b, shadow.opacity);
             Self::paint_distance_shadow(
@@ -683,9 +788,41 @@ impl IconCanvas {
                 oy + shadow.offset_y.round() as i64,
                 shadow.blur, color,
             );
+            if shadow.blur > 12.0 {
+                let key_color = Color::new(
+                    shadow.color.r, shadow.color.g, shadow.color.b,
+                    (shadow.opacity * 0.9).clamp(0.0, 1.0),
+                );
+                Self::paint_distance_shadow(
+                    &mut canvas, &work,
+                    ox + (shadow.offset_x * 0.5).round() as i64,
+                    oy + (shadow.offset_y * 0.5).round() as i64,
+                    (shadow.blur * 0.35).max(4.0), key_color,
+                );
+            }
         }
 
-        // 2. Content on top of the shadow.
+        // 1b. Artwork shadow: the foreground (inverse of the border flood
+        // mask) casts a soft shadow onto the background, so glyphs lift
+        // off like Apple icons. Painted under the content.
+        if let Some(art) = &d.artwork_shadow {
+            let bg = Self::background_mask(&work);
+            let mut silhouette = RgbaImage::from_pixel(work.width(), work.height(), Rgba([0, 0, 0, 0]));
+            for (px, py, pixel) in work.enumerate_pixels() {
+                if pixel[3] > 10 && !bg[py as usize * work.width() as usize + px as usize] {
+                    silhouette.put_pixel(px, py, Rgba([255, 255, 255, 255]));
+                }
+            }
+            let color = Color::new(art.color.r, art.color.g, art.color.b, art.opacity);
+            Self::paint_distance_shadow(
+                &mut canvas, &silhouette,
+                ox + art.offset_x.round() as i64,
+                oy + art.offset_y.round() as i64,
+                art.blur, color,
+            );
+        }
+
+        // 2. Content on top of the shadows.
         for (px, py, pixel) in work.enumerate_pixels() {
             let x = ox + px as i64;
             let y = oy + py as i64;
@@ -721,24 +858,134 @@ impl IconCanvas {
     // ── Processing internals ──────────────────────────────────
 
     /// Flood-fill the border-connected background and repaint it `target`.
+    ///
+    /// Chromatic fringe pixels (anti-aliased blends of artwork and the old
+    /// background that the mask thresholds excluded) are decontaminated:
+    /// their foreground component is re-blended over `target`, so no halo
+    /// of the old background color survives around kept artwork.
     fn replace_background(rgba: &RgbaImage, tr: f32, tg: f32, tb: f32) -> RgbaImage {
         let mask = Self::background_mask(rgba);
+        let w = rgba.width() as usize;
+        let h = rgba.height() as usize;
+        let (rr, rg, rb) = Self::border_reference(rgba);
+        let dist = |a: (f32, f32, f32), b: (f32, f32, f32)| -> f32 {
+            ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2) + (a.2 - b.2).powi(2)).sqrt()
+        };
+        let near_bg = |x: usize, y: usize| -> bool {
+            let x0 = x.saturating_sub(2);
+            let x1 = (x + 2).min(w - 1);
+            let y0 = y.saturating_sub(2);
+            let y1 = (y + 2).min(h - 1);
+            for yy in y0..=y1 {
+                for xx in x0..=x1 {
+                    if mask[yy * w + xx] {
+                        return true;
+                    }
+                }
+            }
+            false
+        };
+        // Nearest kept (non-background) color within 5px, for matte recovery.
+        let nearest_kept = |x: usize, y: usize| -> Option<(f32, f32, f32)> {
+            for rad in 1..=5 {
+                let x0 = x.saturating_sub(rad);
+                let x1 = (x + rad).min(w - 1);
+                let y0 = y.saturating_sub(rad);
+                let y1 = (y + rad).min(h - 1);
+                for yy in y0..=y1 {
+                    for xx in x0..=x1 {
+                        if xx.max(x) - xx.min(x) != rad && yy.max(y) - yy.min(y) != rad {
+                            continue;
+                        }
+                        if mask[yy * w + xx] {
+                            continue;
+                        }
+                        let p = rgba.get_pixel(xx as u32, yy as u32);
+                        if p[3] < 3 {
+                            continue;
+                        }
+                        return Some((
+                            p[0] as f32 / 255.0,
+                            p[1] as f32 / 255.0,
+                            p[2] as f32 / 255.0,
+                        ));
+                    }
+                }
+            }
+            None
+        };
         let mut out = RgbaImage::from_pixel(rgba.width(), rgba.height(), Rgba([0, 0, 0, 0]));
         for (px, py, pixel) in rgba.enumerate_pixels() {
             let a = pixel[3];
             if a < 3 { continue; }
-            if mask[py as usize * rgba.width() as usize + px as usize] {
+            let idx = py as usize * w + px as usize;
+            if mask[idx] {
                 out.put_pixel(px, py, Rgba([
                     (tr * 255.0).round() as u8,
                     (tg * 255.0).round() as u8,
                     (tb * 255.0).round() as u8,
                     a,
                 ]));
-            } else {
-                out.put_pixel(px, py, *pixel);
+                continue;
             }
+            let c = (
+                pixel[0] as f32 / 255.0,
+                pixel[1] as f32 / 255.0,
+                pixel[2] as f32 / 255.0,
+            );
+            // Decontaminate fringe: blends of artwork over the OLD background
+            // become the same blend over the NEW background.
+            if near_bg(px as usize, py as usize) && dist(c, (rr, rg, rb)) < 0.55 {
+                if let Some(fg) = nearest_kept(px as usize, py as usize) {
+                    let fr = (fg.0 - rr, fg.1 - rg, fg.2 - rb);
+                    let denom = fr.0 * fr.0 + fr.1 * fr.1 + fr.2 * fr.2;
+                    let alpha = if denom < 0.0001 {
+                        0.0
+                    } else {
+                        (((c.0 - rr) * fr.0 + (c.1 - rg) * fr.1 + (c.2 - rb) * fr.2) / denom)
+                            .clamp(0.0, 1.0)
+                    };
+                    out.put_pixel(px, py, Rgba([
+                        ((fg.0 * alpha + tr * (1.0 - alpha)) * 255.0).round().clamp(0.0, 255.0) as u8,
+                        ((fg.1 * alpha + tg * (1.0 - alpha)) * 255.0).round().clamp(0.0, 255.0) as u8,
+                        ((fg.2 * alpha + tb * (1.0 - alpha)) * 255.0).round().clamp(0.0, 255.0) as u8,
+                        a,
+                    ]));
+                    continue;
+                }
+            }
+            out.put_pixel(px, py, *pixel);
         }
         out
+    }
+
+    /// Reference color of the image border: average of the outermost 1px.
+    fn border_reference(rgba: &RgbaImage) -> (f32, f32, f32) {
+        let w = rgba.width() as usize;
+        let h = rgba.height() as usize;
+        let mut rr = 0u64;
+        let mut rg = 0u64;
+        let mut rb = 0u64;
+        let mut n = 0u64;
+        let mut acc = |p: &Rgba<u8>| {
+            rr += p[0] as u64;
+            rg += p[1] as u64;
+            rb += p[2] as u64;
+            n += 1;
+        };
+        for x in 0..w {
+            acc(rgba.get_pixel(x as u32, 0));
+            acc(rgba.get_pixel(x as u32, h as u32 - 1));
+        }
+        for y in 0..h {
+            acc(rgba.get_pixel(0, y as u32));
+            acc(rgba.get_pixel(w as u32 - 1, y as u32));
+        }
+        (
+            rr as f32 / 255.0 / n as f32,
+            rg as f32 / 255.0 / n as f32,
+            rb as f32 / 255.0 / n as f32,
+        )
     }
 
     /// Compute the border-connected background mask (true = background),
@@ -760,30 +1007,8 @@ impl IconCanvas {
         let mut is_bg = vec![false; w * h];
         let mut queue: std::collections::VecDeque<(usize, usize)> = std::collections::VecDeque::new();
 
-        // Reference colour: average of the outermost 2px border.
-        let mut rr = 0u64;
-        let mut rg = 0u64;
-        let mut rb = 0u64;
-        let mut n = 0u64;
-        let mut acc = |p: &Rgba<u8>| {
-            rr += p[0] as u64;
-            rg += p[1] as u64;
-            rb += p[2] as u64;
-            n += 1;
-        };
-        for x in 0..w {
-            acc(rgba.get_pixel(x as u32, 0));
-            acc(rgba.get_pixel(x as u32, h as u32 - 1));
-        }
-        for y in 0..h {
-            acc(rgba.get_pixel(0, y as u32));
-            acc(rgba.get_pixel(w as u32 - 1, y as u32));
-        }
-        let (ref_r, ref_g, ref_b) = (
-            rr as f32 / 255.0 / n as f32,
-            rg as f32 / 255.0 / n as f32,
-            rb as f32 / 255.0 / n as f32,
-        );
+        // Reference colour: average of the outermost border.
+        let (ref_r, ref_g, ref_b) = Self::border_reference(rgba);
 
         let dist = |a: (f32, f32, f32), b: (f32, f32, f32)| -> f32 {
             ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2) + (a.2 - b.2).powi(2)).sqrt()
@@ -845,6 +1070,69 @@ impl IconCanvas {
         is_bg
     }
 
+    /// Connected-component mask for size-gated remapping.
+    ///
+    /// Returns `true` for pixels within `tolerance` of `from` that belong to
+    /// a 4-connected component smaller than `max_fraction` of the image area.
+    /// Fully transparent pixels never match. Runs in O(n).
+    fn small_component_mask(
+        rgba: &RgbaImage,
+        from: Color,
+        tolerance: f32,
+        max_fraction: f32,
+    ) -> Vec<bool> {
+        let w = rgba.width() as usize;
+        let h = rgba.height() as usize;
+        let near = |x: usize, y: usize| -> bool {
+            let p = rgba.get_pixel(x as u32, y as u32);
+            if p[3] < 3 {
+                return false;
+            }
+            let r = p[0] as f32 / 255.0;
+            let g = p[1] as f32 / 255.0;
+            let b = p[2] as f32 / 255.0;
+            ((r - from.r).powi(2) + (g - from.g).powi(2) + (b - from.b).powi(2)).sqrt()
+                < tolerance
+        };
+        let limit = (max_fraction.clamp(0.0, 1.0) * (w * h) as f32) as usize;
+        let mut small = vec![false; w * h];
+        let mut seen = vec![false; w * h];
+        let mut stack = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                if seen[y * w + x] || !near(x, y) {
+                    continue;
+                }
+                // Flood one component, collecting its pixel indices.
+                let mut component = Vec::new();
+                stack.push((x, y));
+                seen[y * w + x] = true;
+                while let Some((cx, cy)) = stack.pop() {
+                    component.push(cy * w + cx);
+                    for (dx, dy) in [(-1i64, 0i64), (1, 0), (0, -1), (0, 1)] {
+                        let nx = cx as i64 + dx;
+                        let ny = cy as i64 + dy;
+                        if nx < 0 || ny < 0 || nx >= w as i64 || ny >= h as i64 {
+                            continue;
+                        }
+                        let (nx, ny) = (nx as usize, ny as usize);
+                        if seen[ny * w + nx] || !near(nx, ny) {
+                            continue;
+                        }
+                        seen[ny * w + nx] = true;
+                        stack.push((nx, ny));
+                    }
+                }
+                if component.len() <= limit {
+                    for idx in component {
+                        small[idx] = true;
+                    }
+                }
+            }
+        }
+        small
+    }
+
     /// Improved recolor pass.
     ///
     /// Works on straight-alpha values with proper rounding; anti-aliased edge
@@ -856,6 +1144,17 @@ impl IconCanvas {
 
         let (tgt_h, tgt_s, tgt_l) = Self::rgb_to_hsl(o.tint.r, o.tint.g, o.tint.b);
         let w = rgba.width() as usize;
+
+        // Size-gated remap: precompute which matching pixels belong to
+        // components small enough to remap (holes), so large foreground
+        // shapes (glyphs, bubbles) survive. `None` keeps the legacy
+        // remap-everything behavior.
+        let remap_small: Option<Vec<bool>> = match (o.remap_from, o.remap_max_fraction) {
+            (Some(from), Some(fraction)) => {
+                Some(Self::small_component_mask(rgba, from, o.remap_tolerance, fraction))
+            }
+            _ => None,
+        };
 
         for (px, py, pixel) in rgba.enumerate_pixels() {
             if let Some(mask) = bg_mask {
@@ -876,13 +1175,20 @@ impl IconCanvas {
             if let (Some(from), Some(to)) = (o.remap_from, o.remap_to) {
                 let d = ((r - from.r).powi(2) + (g - from.g).powi(2) + (b - from.b).powi(2)).sqrt();
                 if d < o.remap_tolerance {
-                    out.put_pixel(px, py, Rgba([
-                        (to.r * 255.0).round() as u8,
-                        (to.g * 255.0).round() as u8,
-                        (to.b * 255.0).round() as u8,
-                        pixel[3],
-                    ]));
-                    continue;
+                    let gated = match &remap_small {
+                        Some(mask) => mask[py as usize * w + px as usize],
+                        None => true,
+                    };
+                    if gated {
+                        out.put_pixel(px, py, Rgba([
+                            (to.r * 255.0).round() as u8,
+                            (to.g * 255.0).round() as u8,
+                            (to.b * 255.0).round() as u8,
+                            pixel[3],
+                        ]));
+                        continue;
+                    }
+                    // Large component: fall through to protect / mode below.
                 }
             }
 
@@ -1010,10 +1316,17 @@ impl IconCanvas {
     }
 
     /// Specular rim + inner depth + edge highlight + corner mask, all steered
-    /// by one light direction. The specular band uses the rounded-rect surface
-    /// normal (rim lighting), so the sheen wraps around corners like real
-    /// glass instead of being a flat top gradient.
+    /// Apple Liquid Glass finish, steered by one light direction.
+    ///
+    /// Order: vibrancy -> specular rim -> top gloss + diagonal sheen ->
+    /// inner depth -> bottom shade -> gradient edge stroke -> AA corner mask.
+    /// The specular band uses the rounded-rect surface normal (rim lighting),
+    /// so the sheen wraps around corners like real glass.
     fn apply_depth_effects(img: &mut RgbaImage, d: &DepthOptions) {
+        // Vibrancy works without a rounded rect (e.g. corner 0 builders).
+        if d.vibrancy > 0.001 {
+            Self::apply_vibrancy(img, d.vibrancy);
+        }
         if d.corner_radius <= 0.0 { return; }
         let size = CANVAS_SIZE as f32;
         let r = d.corner_radius.min(size / 2.0);
@@ -1031,6 +1344,36 @@ impl IconCanvas {
                     let a = edge_t * edge_t * rim * d.specular_opacity;
                     if a < 0.01 { continue; }
                     Self::blend_pixel(img, px, py, Rgba([255, 255, 255, (a * 255.0).round() as u8]));
+                }
+            }
+        }
+
+        // Full-surface Liquid Glass gloss: soft top gradient + diagonal sheen.
+        if d.gloss_opacity > 0.001 {
+            let g = d.gloss_opacity;
+            for py in 0..CANVAS_SIZE {
+                let v = py as f32 / size;
+                // Top gradient covering ~45%, quadratic falloff.
+                let top_t = (1.0 - v / 0.45).clamp(0.0, 1.0);
+                let top_a = top_t * top_t * g;
+                for px in 0..CANVAS_SIZE {
+                    let (sdf, _) =
+                        Self::rounded_rect_sdf_normal(px as f32 + 0.5, py as f32 + 0.5, size, size, r);
+                    if sdf >= 0.5 { continue; }
+                    let u = px as f32 / size;
+                    // Slightly stronger toward the light side.
+                    let light_side = 1.0 - ((u - 0.5) - d.light_x * 0.18).abs() * 0.55;
+                    let mut a = top_a * light_side.clamp(0.55, 1.0);
+                    // Diagonal sheen band (glass reflection streak).
+                    let diag = (u + v - 0.62) / 0.20;
+                    let sheen = (-diag * diag).exp() * g * 0.38;
+                    a += sheen;
+                    // Fade gloss right at the rounded edge so the stroke stays crisp.
+                    if sdf > -3.0 {
+                        a *= ((-sdf + 0.5) / 3.5).clamp(0.0, 1.0).max(0.15);
+                    }
+                    if a < 0.012 { continue; }
+                    Self::blend_pixel(img, px, py, Rgba([255, 255, 255, (a * 255.0).round().clamp(0.0, 255.0) as u8]));
                 }
             }
         }
@@ -1055,30 +1398,95 @@ impl IconCanvas {
             }
         }
 
+        // Bottom shade grounds the icon (Apple icons are darker at the base).
+        if d.shade_opacity > 0.001 {
+            let s = d.shade_opacity;
+            for py in 0..CANVAS_SIZE {
+                let v = py as f32 / size;
+                let t = ((v - 0.74) / 0.26).clamp(0.0, 1.0);
+                if t <= 0.0 { continue; }
+                let row_a = t * t * s;
+                for px in 0..CANVAS_SIZE {
+                    let (sdf, _) =
+                        Self::rounded_rect_sdf_normal(px as f32 + 0.5, py as f32 + 0.5, size, size, r);
+                    if sdf >= 0.0 { continue; }
+                    if row_a < 0.012 { continue; }
+                    Self::blend_pixel(img, px, py, Rgba([0, 0, 0, (row_a * 255.0).round() as u8]));
+                }
+            }
+        }
+
+        // Gradient edge stroke: bright on the light side, dimmer opposite.
+        // Top edge reads ~full opacity, bottom edge ~35% (Apple stroke).
         if d.edge_highlight_width > 0.0 {
             let ew = d.edge_highlight_width;
             for py in 0..CANVAS_SIZE {
+                let v = py as f32 / size;
+                let vertical = 0.35 + 0.65 * (1.0 - v);
                 for px in 0..CANVAS_SIZE {
                     let (sdf, n) =
                         Self::rounded_rect_sdf_normal(px as f32 + 0.5, py as f32 + 0.5, size, size, r);
                     if sdf >= 0.0 || -sdf > ew { continue; }
                     let rim = (n[0] * d.light_x + n[1] * d.light_y).max(0.15);
-                    let a = (-sdf / ew) * rim * d.edge_highlight_opacity;
+                    let a = (-sdf / ew) * rim * vertical * d.edge_highlight_opacity;
                     if a < 0.01 { continue; }
                     Self::blend_pixel(img, px, py, Rgba([255, 255, 255, (a * 255.0).round() as u8]));
                 }
             }
+            // Thin dark outer rim on the shadow side for definition.
+            for py in 0..CANVAS_SIZE {
+                for px in 0..CANVAS_SIZE {
+                    let (sdf, n) =
+                        Self::rounded_rect_sdf_normal(px as f32 + 0.5, py as f32 + 0.5, size, size, r);
+                    if sdf >= 0.0 || sdf < -2.0 { continue; }
+                    let away = (-(n[0] * d.light_x + n[1] * d.light_y)).max(0.0);
+                    if away <= 0.05 { continue; }
+                    let a = away * d.shade_opacity * 0.9;
+                    if a < 0.012 { continue; }
+                    Self::blend_pixel(img, px, py, Rgba([0, 0, 0, (a * 255.0).round() as u8]));
+                }
+            }
         }
 
-        // Corner radius mask last.
+        // Anti-aliased corner mask (1.5px feather, no jaggies).
         for py in 0..CANVAS_SIZE {
             for px in 0..CANVAS_SIZE {
                 let (sdf, _) =
                     Self::rounded_rect_sdf_normal(px as f32 + 0.5, py as f32 + 0.5, size, size, r);
                 if sdf >= 0.0 {
                     img.put_pixel(px, py, Rgba([0, 0, 0, 0]));
+                } else if sdf > -1.5 {
+                    let coverage = (-sdf / 1.5).clamp(0.0, 1.0);
+                    let p = img.get_pixel(px, py);
+                    let a = (p[3] as f32 / 255.0 * coverage * 255.0).round().clamp(0.0, 255.0) as u8;
+                    img.put_pixel(px, py, Rgba([p[0], p[1], p[2], a]));
                 }
             }
+        }
+    }
+
+    /// Saturation + contrast pop so flat artwork reads like Apple icons.
+    fn apply_vibrancy(img: &mut RgbaImage, v: f32) {
+        let sat = 1.0 + v * 0.65;
+        let con = 1.0 + v * 0.22;
+        for pixel in img.pixels_mut() {
+            if pixel[3] < 3 { continue; }
+            let r = pixel[0] as f32 / 255.0;
+            let g = pixel[1] as f32 / 255.0;
+            let b = pixel[2] as f32 / 255.0;
+            let luma = Self::luma(r, g, b);
+            // Skip near-grays so UI whites/blacks do not tint.
+            let chroma = r.max(g).max(b) - r.min(g).min(b);
+            if chroma < 0.04 { continue; }
+            let mut nr = luma + (r - luma) * sat;
+            let mut ng = luma + (g - luma) * sat;
+            let mut nb = luma + (b - luma) * sat;
+            nr = (nr - 0.5) * con + 0.5;
+            ng = (ng - 0.5) * con + 0.5;
+            nb = (nb - 0.5) * con + 0.5;
+            pixel[0] = (nr * 255.0).round().clamp(0.0, 255.0) as u8;
+            pixel[1] = (ng * 255.0).round().clamp(0.0, 255.0) as u8;
+            pixel[2] = (nb * 255.0).round().clamp(0.0, 255.0) as u8;
         }
     }
 
@@ -1293,10 +1701,11 @@ impl IconCanvas {
         edge_highlight_width: Option<f32>,
         edge_highlight_opacity: Option<f32>,
     ) -> Result<RgbaImage, Box<dyn std::error::Error>> {
-        let (r, g, b) = match mode {
-            IconMode::Dark => (0.13, 0.13, 0.15),
-            IconMode::Light => (1.0, 1.0, 1.0),
+        let target = match mode {
+            IconMode::Dark => DARK_BACKGROUND,
+            IconMode::Light => Color::WHITE,
         };
+        let (r, g, b) = (target.r, target.g, target.b);
         Self::set_background_color(
             input_path,
             Color::new(r, g, b, 1.0),
@@ -1349,8 +1758,9 @@ impl IconCanvas {
             self.draw_layer(&mut img, layer);
         }
 
-        // 3./4. Post-processing: frosted wash, then light-steered glass
-        // effects (specular rim, inner depth, edge highlight) and corner mask.
+        // 3./4. Post-processing: frosted wash, then Apple Liquid Glass
+        // (vibrancy, specular rim, top gloss + sheen, inner depth, bottom
+        // shade, gradient edge stroke) and AA corner mask.
         if self.frosted_opacity > 0.0 {
             self.draw_frosted(&mut img);
         }
@@ -1365,11 +1775,15 @@ impl IconCanvas {
         DepthOptions {
             corner_radius: self.corner_radius,
             shadow: None,
+            artwork_shadow: None,
             inner_depth_blur: self.inner_depth_blur,
             inner_depth_opacity: if self.inner_depth_blur > 0.0 { self.inner_depth_opacity } else { 0.0 },
             specular_opacity: self.specular_opacity,
             edge_highlight_width: self.edge_highlight_width,
             edge_highlight_opacity: self.edge_highlight_opacity,
+            gloss_opacity: self.gloss_opacity,
+            vibrancy: self.vibrancy,
+            shade_opacity: self.shade_opacity,
             light_x: self.light_x,
             light_y: self.light_y,
         }

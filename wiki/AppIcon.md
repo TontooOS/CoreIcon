@@ -19,8 +19,10 @@ Both APIs live in `CoreIcon::generator`:
 
 ```rust
 pub enum Appearance { Light, Dark }
-pub const DARK_BACKGROUND: Color;
+pub const DARK_BACKGROUND: Color; // TontooOS dark #1d1d1d
+pub const APPLE_CORNER_RADIUS: f32 = 232.0;
 pub fn default_app_icon_depth() -> DepthOptions;
+pub fn apple_liquid_glass(corner_radius: f32) -> DepthOptions;
 
 pub struct AppIcon { /* ... */ }
 impl IconCanvas {
@@ -36,9 +38,10 @@ icon.save("app-icon.png")?;
 ```
 
 Takes any flat image, scales it to exactly 1024x1024, rounds it into the
-app-icon squircle (`corner_radius 220`) and adds the default Liquid Glass
-finish (shadow, inner depth, specular, edge highlight). Colors are left
-completely untouched.
+Apple squircle (`APPLE_CORNER_RADIUS 232`) and adds the Apple-strong Liquid
+Glass finish: dual drop shadow (ambient + key), vibrancy pop, top gloss +
+diagonal sheen, specular rim, wide inner bevel, bottom shade, gradient edge
+stroke and an anti-aliased corner mask. Colors are left completely untouched.
 
 ## API 2: `AppIcon`
 
@@ -62,10 +65,15 @@ Default equals API 1. Options combine freely:
 
 | Call chain | Background | Artwork |
 |---|---|---|
-| `from_file(..)` | Original | Original colors |
-| `.. .dark()` | Dark gray `(0.13, 0.13, 0.15)` | Original colors preserved (a blue VS Code logo stays blue); white interior cutouts follow the background |
+| `from_file(..)` | Original | Original colors + vibrancy pop + full Apple glass finish |
+| `.. .dark()` | TontooOS dark `#1d1d1d` | Original colors preserved (a blue VS Code logo stays blue); white interior cutouts follow the background |
 | `.. .tint(c)` (Light) | Original (untouched) | HSL colorize toward `c`; grays / whites / blacks are protected |
-| `.. .dark().tint(c)` | Dark gray | Luminance-graded `Shaded` replacement toward `c`; interior cutouts follow the background |
+| `.. .dark().tint(c)` | TontooOS dark `#1d1d1d` | Luminance-graded `Shaded` replacement toward `c`; interior cutouts follow the background |
+
+The Apple glass finish (`gloss 0.24`, `vibrancy 0.22`, `specular 0.50`,
+`inner_depth(52, 0.38)`, `edge(3, 0.60)`, `shade 0.20`) is always applied.
+For a custom radius with the same finish, use
+`apple_liquid_glass(radius)` with `process_file` / `process_image`.
 
 > **Note:** `.light()` is the default appearance and only matters to undo a
 > previous `.dark()` in a builder chain.
@@ -76,9 +84,10 @@ Returns `Err` when the source file cannot be opened or decoded.
 
 `Appearance::Dark` swaps the flood-filled background to `DARK_BACKGROUND`
 and then runs a pass-through recolor (`intensity 0`) whose only active rule
-is `remap(white -> dark background)`. Interior white cutouts therefore blend
-into the background instead of glowing, while every other pixel keeps its
-original hue.
+is a size-gated `remap(white -> dark background)` limited by
+`DARK_REMAP_MAX_FRACTION` (`0.10`). Small white holes / cutouts therefore
+blend into the background instead of glowing, while large white foreground
+shapes (glyphs, bubbles) and every other pixel keep their original hue.
 
 ## Usage / Example
 

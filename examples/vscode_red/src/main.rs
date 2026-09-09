@@ -21,7 +21,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .neutral_threshold(0.08);
     let light = IconCanvas::process_file(
         "../vscode_converted.png",
-        &ProcessOptions { recolor: Some(recolor_light), background_replace: None, depth: depth() },
+        &ProcessOptions { recolor: Some(recolor_light), background_replace: None, depth: depth(), ..Default::default() },
     )?;
     light.save("vscode_red.png")?;
     println!("Saved: vscode_red.png");
@@ -41,6 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             recolor: Some(recolor_dark),
             background_replace: Some(dark_gray),
             depth: depth(),
+            ..Default::default()
         },
     )?;
     dark.save("vscode_red_dark.png")?;
@@ -59,6 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             recolor: Some(recolor_gray),
             background_replace: Some(light_gray),
             depth: depth(),
+            ..Default::default()
         },
     )?;
     gray.save("vscode_red_lightgray.png")?;

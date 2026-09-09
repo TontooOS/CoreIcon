@@ -49,13 +49,16 @@ post-processing effects start at zero.
 | Method | Signature | Description |
 |---|---|---|
 | `background` | `background(bg: Background) -> Self` | Fill the entire canvas |
-| `corner_radius` | `corner_radius(r: f32) -> Self` | Round the canvas edges (`0` = square) |
+| `corner_radius` | `corner_radius(r: f32) -> Self` | Round the canvas edges (`0` = square, `APPLE_CORNER_RADIUS` = `232.0` for the Apple squircle) |
 | `frosted` | `frosted(opacity: f32) -> Self` | White glass wash, `0.0`–`1.0` |
 | `specular` | `specular(opacity: f32) -> Self` | Glossy rim highlight on light-facing edges |
+| `gloss` | `gloss(opacity: f32) -> Self` | Full-surface top gloss + diagonal sheen (Apple Liquid Glass) |
+| `vibrancy` | `vibrancy(v: f32) -> Self` | Saturation + contrast pop for flat artwork |
+| `shade` | `shade(opacity: f32) -> Self` | Bottom inner shade that grounds the icon |
 | `inner_depth` | `inner_depth(blur: f32, opacity: f32) -> Self` | Inner shadow on the side away from the light |
-| `edge_highlight` | `edge_highlight(width: f32, opacity: f32) -> Self` | Bright edge line inside the round rect |
-| `light_direction` | `light_direction(x: f32, y: f32) -> Self` | Light source for `specular`, `inner_depth`, `edge_highlight`; default top-left (`-0.6, -0.8`) |
-| `glass` | `glass() -> Self` | One-call Liquid Glass preset (see below) |
+| `edge_highlight` | `edge_highlight(width: f32, opacity: f32) -> Self` | Gradient edge stroke, bright on the light side |
+| `light_direction` | `light_direction(x: f32, y: f32) -> Self` | Light source for `specular`, `inner_depth`, `edge_highlight`, `gloss`; default top-left (`-0.45, -0.89`) |
+| `glass` | `glass() -> Self` | One-call Apple Liquid Glass preset (see below) |
 | `layer` | `layer(layer: Layer) -> Self` | Append a layer (drawn in order) |
 
 ### Rendering
@@ -73,17 +76,20 @@ The render order is:
 1. Background fill
 2. All layers (in order: `shadow`, then element content)
 3. Frosted wash (if enabled)
-4. Light-steered glass effects: specular rim, inner depth, edge highlight
-5. Corner radius mask (everything outside the rounded rect becomes transparent)
+4. Light-steered glass effects: vibrancy, specular rim, top gloss + sheen,
+   inner depth, bottom shade, gradient edge stroke
+5. Anti-aliased corner mask (1.5px feather, everything outside the rounded
+   rect becomes transparent)
 
 ### Liquid Glass preset
 
-`.glass()` applies the iOS-style combination in one call:
+`.glass()` applies the Apple Tahoe / iOS 26 combination in one call:
 
 ```rust
 let icon = IconCanvas::new()
-    .glass()          // corner_radius 256, frosted 0.16, specular 0.30,
-    // ... layers ... // inner_depth(36, 0.32), edge_highlight(6, 0.40)
+    .glass()          // corner 232, frosted 0.08, specular 0.50,
+    // ... layers ... // inner_depth(52, 0.38), edge(3, 0.60),
+                      // gloss 0.24, vibrancy 0.18, shade 0.20
     .background(Background::color(Color::from_hex("#2255AA").unwrap()))
 ;
 ```
@@ -215,25 +221,30 @@ values are greater than zero.
 | Effect | Parameters | Description |
 |---|---|---|
 | Frosted | `opacity` | Blends white over every opaque pixel; simulates frosted glass |
+| Vibrancy | `v` | Saturation + contrast pop; near-grays (whites/blacks) are skipped |
 | Specular | `opacity` | Bright rim on the edges facing the light (rim lighting via the rounded-rect surface normal), fading inward over ~3.5% of the canvas |
+| Gloss | `opacity` | Soft white gradient over the top ~45% plus a diagonal sheen band (Apple Liquid Glass) |
 | Inner Depth | `blur`, `opacity` | Darkens the inside edge on the side away from the light |
-| Edge Highlight | `width`, `opacity` | Bright line along the inside edge, strongest where the edge faces the light |
+| Bottom Shade | `opacity` | Dark gradient over the bottom ~26% that grounds the icon |
+| Edge Highlight | `width`, `opacity` | Gradient stroke along the inside edge: full strength on the light side, ~35% opposite; plus a thin dark outer rim on the shadow side |
 
-All three light-steered effects share `light_direction(x, y)`. The vector
-points toward the light source; the default is top-left (`-0.6, -0.8`). Because
-the specular band uses the surface normal of the rounded rect, the sheen wraps
-around corners like real glass.
+All light-steered effects share `light_direction(x, y)`. The vector
+points toward the light source; the default is top-left (`-0.45, -0.89`).
+Because the specular band uses the surface normal of the rounded rect, the
+sheen wraps around corners like real glass.
 
-For the iOS 26 Liquid Glass look, either combine them manually or use
+For the Apple Liquid Glass look, either combine them manually or use
 `.glass()`.
 
 ```rust
 let icon = IconCanvas::new()
-    .corner_radius(256.0)
-    .frosted(0.18)
-    .specular(0.30)
-    .inner_depth(40.0, 0.35)
-    .edge_highlight(8.0, 0.45)
+    .corner_radius(232.0)
+    .gloss(0.24)
+    .vibrancy(0.18)
+    .specular(0.50)
+    .inner_depth(52.0, 0.38)
+    .shade(0.20)
+    .edge_highlight(3.0, 0.60)
     // ... layers ...
 ;
 ```
@@ -301,9 +312,9 @@ same pipeline as `process_image`. Pipeline order:
 
 1. Background replacement (flood fill from the edges)
 2. Recolor (`RecolorOptions`)
-3. Shadow (distance transform) -> content -> specular -> inner depth ->
-   edge highlight
-4. Corner radius mask
+3. Dual shadow (distance transform) -> content -> vibrancy -> gloss +
+   sheen -> specular -> inner depth -> bottom shade -> gradient edge stroke
+4. Anti-aliased corner mask
 
 ```rust
 pub struct ProcessOptions {
@@ -326,11 +337,23 @@ Builder for all depth effects; defaults switch every effect off.
 | Method | Description |
 |---|---|
 | `DepthOptions::new(corner_radius)` | Start with a corner radius, effects off |
-| `.shadow(s)` | Glyph-shaped drop shadow (`Shadow`) |
+| `.shadow(s)` | Dual drop shadow: large soft ambient + tight key (`Shadow`); key is synthesized when `blur > 12` |
+| `.artwork_shadow(s)` | Glyph drop shadow onto the background (file pipeline only; foreground = inverse of the border flood mask) |
 | `.inner_depth(blur, opacity)` | Inner bevel away from the light |
 | `.specular(opacity)` | Rim highlight toward the light |
-| `.edge_highlight(width, opacity)` | Bright edge line |
-| `.light_direction(x, y)` | Light source vector, default top-left |
+| `.gloss(opacity)` | Top gloss + diagonal sheen |
+| `.vibrancy(v)` | Saturation + contrast pop |
+| `.shade(opacity)` | Bottom grounding shade |
+| `.edge_highlight(width, opacity)` | Gradient edge stroke + dark outer rim on the shadow side |
+| `.light_direction(x, y)` | Light source vector, default top-left (`-0.45, -0.89`) |
+
+Apple presets:
+
+```rust
+pub const APPLE_CORNER_RADIUS: f32 = 232.0;
+pub fn default_app_icon_depth() -> DepthOptions; // Apple-strong AppIcon finish
+pub fn apple_liquid_glass(corner_radius: f32) -> DepthOptions; // same finish, custom radius
+```
 
 ### `recolor_image`
 
@@ -378,6 +401,10 @@ given color - typically the flat background color swapped earlier in the same
 `remap(from, to)` replaces pixels within `remap_tolerance` of `from` with `to`
 outright, before the mode is applied. Use it for interior cutouts that should
 follow the swapped background color instead of the artwork color.
+`remap_max_fraction(f)` restricts the remap to connected components smaller
+than `f` of the image area, so small holes follow the background while large
+foreground shapes (white glyphs, bubbles) survive. `None` (default) remaps
+every matching pixel.
 
 `intensity` blends linearly between original and recolored (`0.0` = original).
 In `Colorize` mode pixels with saturation at or below `neutral_threshold`
@@ -594,14 +621,14 @@ and replacing it. The foreground (logo, text, icons) stays unchanged.
 
 ```rust
 pub enum IconMode {
-    Dark,   // background -> dark gray (0.13, 0.13, 0.15)
+    Dark,   // background -> TontooOS dark #1d1d1d (DARK_BACKGROUND)
     Light,  // background -> white (1.0, 1.0, 1.0)
 }
 ```
 
 | Variant | Background replacement |
 |---|---|
-| `Dark` | `(0.13, 0.13, 0.15)` dark gray |
+| `Dark` | `#1d1d1d` TontooOS dark (`DARK_BACKGROUND`) |
 | `Light` | `(1.0, 1.0, 1.0)` white |
 
 ### `dark_light_mode`
@@ -628,10 +655,12 @@ from the image edges, then replaces every background pixel with a solid color
 (see `IconMode`). Foreground pixels are kept as-is. Depth effects are applied
 on top. Implemented via [`set_background_color`](#set_background_color).
 
-The flood fill starts from all four border edges. A 4-connected neighbor is
-added to the background region when the Euclidean RGB distance to the current
-pixel is below the threshold `0.22`; any pixel not reached by the fill is
-treated as foreground.
+The flood fill starts from all four border edges against a 2px-border
+reference color. A 4-connected neighbor joins the background when it is close
+to the reference (`0.32`) and close to its chain neighbor (`0.25`), which
+keeps the fill from leaking through soft logo edges. One dilation pass
+absorbs low-chroma halo pixels so the swapped background has no bright
+fringe. Any pixel not reached by the fill is treated as foreground.
 
 ### `set_background_color`
 
@@ -644,7 +673,9 @@ pub fn set_background_color(
 ```
 
 Generalization of `dark_light_mode`: replaces the flood-filled background with
-any `Color` instead of the two fixed presets.
+any `Color` instead of the two fixed presets. Chromatic fringe pixels around
+kept artwork are decontaminated (re-blended over the new color), so no halo
+of the old background survives.
 
 ```rust
 use CoreIcon::generator::{DepthOptions, IconCanvas};
