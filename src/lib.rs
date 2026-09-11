@@ -2,8 +2,60 @@
 // Contains all SF Symbols for TontooOS with Color, Gradient & Transparency.
 
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 pub const ASSETS_DIR: &str = "assets/icons";
+
+/// Sidecar resources of this library on a TontooOS system.
+/// `stage-frameworks.sh` copies `assets/`, `lang/`, ... next to the
+/// `coreicon.library` file into `/Library/System/coreicon.resources/`.
+pub const SYSTEM_RESOURCES_DIR: &str = "/Library/System/coreicon.resources";
+/// Legacy fallback: staged crate sources at `/Library/System/coreicon/`.
+pub const SYSTEM_SOURCE_DIR: &str = "/Library/System/coreicon";
+
+fn probe_first(candidates: &[PathBuf]) -> Option<PathBuf> {
+    for c in candidates {
+        if c.exists() {
+            return Some(c.clone());
+        }
+    }
+    None
+}
+
+fn candidate_icon_dirs() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(env) = std::env::var("COREICON_ASSETS_DIR") {
+        let p = PathBuf::from(env);
+        if !p.as_os_str().is_empty() {
+            out.push(p);
+        }
+    }
+    out.push(PathBuf::from(format!("{}/assets/icons", SYSTEM_RESOURCES_DIR)));
+    out.push(PathBuf::from(format!("{}/assets/icons", SYSTEM_SOURCE_DIR)));
+    out.push(PathBuf::from(ASSETS_DIR));
+    out
+}
+
+/// Resolve the SF Symbol PNG folder at runtime.
+///
+/// Priority: `$COREICON_ASSETS_DIR` override, LiveOS sidecar
+/// (`/Library/System/coreicon.resources/assets/icons`), staged sources
+/// (`/Library/System/coreicon/assets/icons`), then the relative crate dir
+/// (`assets/icons`, dev / `cargo run`). Falls back to the relative dir when
+/// nothing exists so error messages stay familiar.
+pub fn resolve_icon_dir() -> PathBuf {
+    probe_first(&candidate_icon_dirs()).unwrap_or_else(|| PathBuf::from(ASSETS_DIR))
+}
+
+/// Resolve the PNG file for an SF Symbol name (without extension).
+pub fn resolve_icon_path(name: &str) -> PathBuf {
+    // A runtime-customised `ASSETS_DIR` wins when the file exists there.
+    let custom = PathBuf::from(ASSETS_DIR).join(format!("{}.png", name));
+    if custom.exists() {
+        return custom;
+    }
+    resolve_icon_dir().join(format!("{}.png", name))
+}
 
 // Color
 
@@ -73,7 +125,7 @@ pub struct SFSymbol { name: &'static str }
 
 impl SFSymbol {
     pub const fn name(self) -> &'static str { self.name }
-    pub fn path(self) -> String { format!("{}/{}.png", ASSETS_DIR, self.name) }
+    pub fn path(self) -> String { resolve_icon_path(self.name).to_string_lossy().into_owned() }
     pub fn from_name(name: &str) -> Option<Self> { ALL.iter().find(|s| s.name == name).copied() }
     pub fn all() -> &'static [SFSymbol] { &ALL }
     pub fn count() -> usize { ALL.len() }

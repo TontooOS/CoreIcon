@@ -10,18 +10,55 @@ use std::path::{Path, PathBuf};
 /// Base directory for versioned assets.
 pub const OS_VERSION_ASSETS_DIR: &str = "assets/TontooOS/OSVersionAssets";
 
+/// Resolve the versioned assets base dir at runtime.
+///
+/// Priority: `$COREICON_OS_VERSION_DIR` override, LiveOS sidecar
+/// (`/Library/System/coreicon.resources/assets/TontooOS/OSVersionAssets`),
+/// staged sources, then the relative crate dir.
+pub fn resolve_os_version_base() -> PathBuf {
+    let mut candidates = Vec::new();
+    if let Ok(env) = std::env::var("COREICON_OS_VERSION_DIR") {
+        let p = PathBuf::from(env);
+        if !p.as_os_str().is_empty() {
+            candidates.push(p);
+        }
+    }
+    candidates.push(PathBuf::from(format!(
+        "{}/assets/TontooOS/OSVersionAssets",
+        crate::SYSTEM_RESOURCES_DIR
+    )));
+    candidates.push(PathBuf::from(format!(
+        "{}/assets/TontooOS/OSVersionAssets",
+        crate::SYSTEM_SOURCE_DIR
+    )));
+    candidates.push(PathBuf::from(OS_VERSION_ASSETS_DIR));
+    for c in &candidates {
+        if c.exists() {
+            return c.clone();
+        }
+    }
+    PathBuf::from(OS_VERSION_ASSETS_DIR)
+}
+
 /// Build the on-disk path for a versioned asset.
 ///
 /// Example: `os_version_path("26.1.0", "seal.png")`
 /// -> `"assets/TontooOS/OSVersionAssets/26.1.0/seal.png"`
+/// (absolute under `/Library/System/...` on LiveOS when staged).
 pub fn os_version_path(version: &str, name: &str) -> String {
     // Normalise `name`: allow with or without extension already.
-    format!("{}/{}/{}", OS_VERSION_ASSETS_DIR, version.trim(), name.trim())
+    let rel = format!("{}/{}/{}", OS_VERSION_ASSETS_DIR, version.trim(), name.trim());
+    let abs = resolve_os_version_base().join(version.trim()).join(name.trim());
+    if abs.exists() {
+        abs.to_string_lossy().into_owned()
+    } else {
+        rel
+    }
 }
 
 /// List all version folders that exist under `OSVersionAssets`.
 pub fn available_versions() -> Vec<String> {
-    let base = PathBuf::from(OS_VERSION_ASSETS_DIR);
+    let base = resolve_os_version_base();
     let Ok(entries) = std::fs::read_dir(&base) else { return Vec::new() };
     let mut out = Vec::new();
     for e in entries.flatten() {
@@ -39,7 +76,7 @@ pub fn available_versions() -> Vec<String> {
 
 /// List asset file names for a given version (non-recursive, files only).
 pub fn available_icons(version: &str) -> Vec<String> {
-    let dir = PathBuf::from(format!("{}/{}", OS_VERSION_ASSETS_DIR, version));
+    let dir = resolve_os_version_base().join(version);
     let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
     let mut out = Vec::new();
     for e in entries.flatten() {
@@ -74,7 +111,14 @@ impl OsVersionIcon {
 
     /// Load the image (supports PNG, JPG, etc. via `image::open`).
     pub fn load(&self) -> Result<RgbaImage, Box<dyn std::error::Error>> {
-        let p = self.path();
+        // Resolve again at load time so a sidecar staged after path()
+        // was called is still found.
+        let abs = resolve_os_version_base().join(self.version.trim()).join(self.name.trim());
+        let p = if abs.exists() {
+            abs.to_string_lossy().into_owned()
+        } else {
+            self.path()
+        };
         Ok(image::open(&p)?.to_rgba8())
     }
 
@@ -103,7 +147,7 @@ pub fn use_osversionicons(version: &str, name: &str) -> Result<RgbaImage, Box<dy
         return Ok(image::open(&p)?.to_rgba8());
     }
     // case-insensitive fallback: scan directory for case-insensitive match
-    let dir = PathBuf::from(format!("{}/{}", OS_VERSION_ASSETS_DIR, version));
+    let dir = resolve_os_version_base().join(version);
     if let Ok(entries) = std::fs::read_dir(&dir) {
         let target = name.to_ascii_lowercase();
         for e in entries.flatten() {

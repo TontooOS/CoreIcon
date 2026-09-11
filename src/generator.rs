@@ -9,7 +9,20 @@ pub const CANVAS_SIZE: u32 = 1024;
 
 /// Base directory for SF Symbol assets.
 /// Set this to the path of the `assets/icons/` folder at runtime.
+/// When the file is not found here, `icon_sprite` falls back to
+/// `crate::resolve_icon_path` (LiveOS sidecar under
+/// `/Library/System/coreicon.resources/`, then staged sources).
 pub static mut ASSETS_DIR: &str = "assets/icons";
+
+/// Resolve the PNG file for `symbol`: runtime override first (when the file
+/// exists there), then the shared crate resolver.
+fn icon_file(symbol: &SFSymbol) -> PathBuf {
+    let custom = unsafe { PathBuf::from(ASSETS_DIR).join(format!("{}.png", symbol.name())) };
+    if custom.exists() {
+        return custom;
+    }
+    crate::resolve_icon_path(symbol.name())
+}
 
 /// Icon color mode for `dark_light_mode`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1989,7 +2002,7 @@ impl IconCanvas {
     /// preserving its aspect ratio (contain fit, centered). Returns the
     /// positioned sprite ready for compositing.
     fn icon_sprite(&self, layer: &Layer, symbol: &SFSymbol) -> Option<(RgbaImage, u32, u32)> {
-        let full = unsafe { PathBuf::from(ASSETS_DIR).join(format!("{}.png", symbol.name())) };
+        let full = icon_file(symbol);
         let icon_img = image::open(&full).ok()?;
         let p = self.padding;
         let box_w = (layer.width - p * 2.0).max(1.0);

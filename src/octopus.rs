@@ -12,6 +12,35 @@ use std::path::{Path, PathBuf};
 /// Base directory for the TontooOS branding assets (relative to crate root / runtime CWD).
 pub const TONTOO_OS_ASSETS_DIR: &str = "assets/TontooOS";
 
+/// Resolve the branding assets folder at runtime.
+///
+/// Priority: `$COREICON_TONTOO_OS_DIR` override, LiveOS sidecar
+/// (`/Library/System/coreicon.resources/assets/TontooOS`), staged sources
+/// (`/Library/System/coreicon/assets/TontooOS`), then the relative crate dir.
+pub fn resolve_octopus_dir() -> PathBuf {
+    let mut candidates = Vec::new();
+    if let Ok(env) = std::env::var("COREICON_TONTOO_OS_DIR") {
+        let p = PathBuf::from(env);
+        if !p.as_os_str().is_empty() {
+            candidates.push(p);
+        }
+    }
+    candidates.push(PathBuf::from(format!("{}/assets/TontooOS", crate::SYSTEM_RESOURCES_DIR)));
+    candidates.push(PathBuf::from(format!("{}/assets/TontooOS", crate::SYSTEM_SOURCE_DIR)));
+    candidates.push(PathBuf::from(TONTOO_OS_ASSETS_DIR));
+    for c in &candidates {
+        if c.exists() {
+            return c.clone();
+        }
+    }
+    PathBuf::from(TONTOO_OS_ASSETS_DIR)
+}
+
+/// Resolve the file for an octopus variant (absolute on LiveOS when staged).
+pub fn resolve_octopus_path(file_name: &str) -> PathBuf {
+    resolve_octopus_dir().join(file_name)
+}
+
 /// All known octopus/logo variants shipped in `assets/TontooOS/`.
 ///
 /// The filenames use mixed casing; this enum normalises them so callers do not
@@ -59,7 +88,7 @@ impl OctopusVariant {
 
     /// Absolute (runtime-relative) path to the file.
     pub fn path(self) -> String {
-        format!("{}/{}", TONTOO_OS_ASSETS_DIR, self.file_name())
+        resolve_octopus_path(self.file_name()).to_string_lossy().into_owned()
     }
 
     /// Try to parse a file name or label (case-insensitive, with or without
@@ -235,9 +264,9 @@ fn load_tinted_path(path: &str, color: Color) -> Result<RgbaImage, Box<dyn std::
 // Helpers for runtime discovery (scans the assets folder on disk)
 // ---------------------------------------------------------------------------
 
-/// Scan `assets/TontooOS/` and return file names that are present on disk.
+/// Scan the resolved `assets/TontooOS/` dir and return file names present on disk.
 pub fn available_on_disk() -> Vec<String> {
-    let dir = PathBuf::from(TONTOO_OS_ASSETS_DIR);
+    let dir = resolve_octopus_dir();
     let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
     let mut out = Vec::new();
     for e in entries.flatten() {

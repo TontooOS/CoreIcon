@@ -24,6 +24,7 @@ Liquid Glass post-processing and text.
 | AppIcon | [AppIcon.md](AppIcon.md) | High-level APIs: PNG to 3D app icon, dark mode + color options |
 | Octopus | [Octopus.md](Octopus.md) | TontooOS octopus branding icons: `use_octopus` with PNG variant + `Color` tint |
 | OsVersion | [OsVersion.md](OsVersion.md) | OS version assets: `use_osversionicons` with `version` + `name` under `OSVersionAssets/` |
+| RuntimePaths | [RuntimePaths.md](RuntimePaths.md) | LiveOS asset lookup: sidecar-first resolvers for icons, branding and versioned assets |
 
 ## Quick Start
 
@@ -63,6 +64,14 @@ See [Generator.md](Generator.md), [Color.md](Color.md) and
 
 ## Changelog
 
+- 2026-09-11: LiveOS runtime paths: new resolvers `resolve_icon_dir`,
+  `resolve_icon_path`, `octopus::resolve_octopus_dir`,
+  `octopus::resolve_octopus_path` and `os_version::resolve_os_version_base`
+  (env override, `/Library/System/coreicon.resources/` sidecar, staged
+  sources, relative dev dir); `SFSymbol::path`, `OctopusVariant::path`,
+  `os_version_path` and the generator sprite loader use them, so SF Symbols
+  and branding load on LiveOS without manual `ASSETS_DIR` setup.
+  See [RuntimePaths.md](RuntimePaths.md).
 - 2026-09-09: Halo-free swaps + glyph depth: `replace_background`
   decontaminates chromatic fringe over the new color (no light-blue halo
   around kept glyphs); new `DepthOptions::artwork_shadow` (file pipeline)
