@@ -22,6 +22,7 @@ Liquid Glass post-processing and text.
 | Icon Generator | [Generator.md](Generator.md) | `IconCanvas`, `Layer`, `Shadow`, `Background`, image processing pipeline, PNG generation |
 | TintMatrix | [TintMatrix.md](TintMatrix.md) | 4x5 color-matrix recoloring (Apple-style tint rows) |
 | AppIcon | [AppIcon.md](AppIcon.md) | High-level APIs: PNG to 3D app icon, dark mode + color options |
+| Tico | [Tico.md](Tico.md) | `.tico` icon container: ZIP-based layer storage with high-res tinted rendering |
 | Octopus | [Octopus.md](Octopus.md) | TontooOS octopus branding icons: `use_octopus` with PNG variant + `Color` tint |
 | OsVersion | [OsVersion.md](OsVersion.md) | OS version assets: `use_osversionicons` with `version` + `name` under `OSVersionAssets/` |
 | RuntimePaths | [RuntimePaths.md](RuntimePaths.md) | LiveOS asset lookup: sidecar-first resolvers for icons, branding and versioned assets |
@@ -64,6 +65,12 @@ See [Generator.md](Generator.md), [Color.md](Color.md) and
 
 ## Changelog
 
+- 2026-09-24: Added TICO (`.tico` icon container): plain ZIP named `*.tico`
+  with `manifest.json` + `layer/NN.tlyr` custom layer files (no preview, no
+  PNG files); `Tico::export` rasterizes `IconCanvas` layers at 1024px,
+  `Tico::load` + `TicoIcon::render(size, tint)` re-renders high-res icons in
+  any color with the Apple finish. Demo: 2 layers in 6.5KB.
+  See [Tico.md](Tico.md).
 - 2026-09-24: AppIcon tint + background-mask overhaul: Light+tint now uses
   luminance-graded `Shaded` (uniform hue, overlaps stay darker) instead of
   `Colorize` (which washed yellows pale and greens dark); Dark uses the

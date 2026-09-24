@@ -165,6 +165,9 @@ pub mod prelude { pub use crate::{SFSymbol, SFSymbolView, Color, Gradient, Gradi
 // Icon generator
 pub mod generator;
 
+// TICO icon container (ZIP-based `.tico` files with compact layer storage)
+pub mod tico;
+
 // Color matrix recoloring
 pub mod tint;
 pub use tint::TintMatrix;

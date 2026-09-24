@@ -886,6 +886,30 @@ impl IconCanvas {
         Ok(())
     }
 
+    /// Apply the Apple app-icon finish (Liquid Glass + corner mask, no outer
+    /// shadow) to an already-composited image. Used by TICO render.
+    pub fn apply_app_icon_finish(img: &mut RgbaImage) {
+        Self::apply_depth_effects(img, &default_app_icon_depth());
+    }
+
+    /// Number of layers (TICO export).
+    pub(crate) fn tico_layer_count(&self) -> usize { self.layers.len() }
+
+    /// Clone of one layer (TICO export).
+    pub(crate) fn tico_layer(&self, idx: usize) -> Option<Layer> { self.layers.get(idx).cloned() }
+
+    /// Clone of the background (TICO export).
+    pub(crate) fn tico_background(&self) -> Background { self.background.clone() }
+
+    /// Rasterize a single layer onto a transparent canvas (TICO export).
+    /// Always renders at full [`CANVAS_SIZE`] so stored layers stay sharp.
+    pub(crate) fn tico_rasterize_layer(&self, idx: usize) -> Option<RgbaImage> {
+        let layer = self.layers.get(idx)?;
+        let mut img = RgbaImage::from_pixel(CANVAS_SIZE, CANVAS_SIZE, Rgba([0, 0, 0, 0]));
+        self.draw_layer(&mut img, layer);
+        Some(img)
+    }
+
     // ═══════════════════════════════════════════════════════════════
     // Image processing core — recolor / background swap / depth effects
     // ═══════════════════════════════════════════════════════════════
