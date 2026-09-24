@@ -299,6 +299,15 @@ pub fn apple_liquid_glass(corner_radius: f32) -> DepthOptions {
         .shade(0.20)
 }
 
+/// Palette entry extracted from opaque border pixels.
+#[derive(Debug, Clone, Copy)]
+struct BorderPaletteEntry {
+    r: f32,
+    g: f32,
+    b: f32,
+    count: usize,
+}
+
 impl IconCanvas {
     /// API 1 - PNG to 3D app icon.
     ///
@@ -399,44 +408,181 @@ impl AppIcon {
                 img, CANVAS_SIZE, CANVAS_SIZE, image::imageops::FilterType::Lanczos3),
         };
 
-        let mut options = ProcessOptions {
-            recolor: None,
-            background_replace: None,
-            depth: default_app_icon_depth(),
-            protect_background: false,
-        };
-
         match self.appearance {
             Appearance::Light => {
-                // Keep the original background; tint the whole artwork -
-                // including gray artwork - while only the flood-filled
-                // background region is protected.
+                let mut options = ProcessOptions {
+                    recolor: None,
+                    background_replace: None,
+                    depth: default_app_icon_depth(),
+                    protect_background: false,
+                };
                 if let Some(tint) = self.tint {
                     options.protect_background = true;
+                    // Luminance-graded `Shaded` replacement: every artwork
+                    // pixel becomes the tint scaled by its lightness, so all
+                    // petals share one hue while overlaps stay darker. Unlike
+                    // `Colorize` (which keeps each hue's own lightness and
+                    // turns yellows pale and greens dark), `Shaded` clamps
+                    // light pixels to the full tint for a uniform result.
                     options.recolor = Some(
-                        RecolorOptions::new(tint, 1.0).mode(RecolorMode::Colorize).neutral_threshold(0.0),
+                        RecolorOptions::new(tint, 1.0).mode(RecolorMode::Shaded),
                     );
                 }
+                Ok(IconCanvas::process_image(&src, &options))
             }
             Appearance::Dark => {
-                options.background_replace = Some(DARK_BACKGROUND);
-                options.recolor = Some(match self.tint {
-                    Some(tint) => RecolorOptions::new(tint, 1.0)
-                        .mode(RecolorMode::Shaded)
-                        .protect(DARK_BACKGROUND)
-                        .remap(Color::WHITE, DARK_BACKGROUND)
-                        .remap_max_fraction(DARK_REMAP_MAX_FRACTION),
-                    None =>
-                        // intensity 0 = pass-through recolor; only the
-                        // size-gated white->background remap takes effect.
+                // Standard path: flood-fill the border-connected background
+                // to dark, remap small white cutouts, optionally tint via
+                // `Shaded`. This handles colorful artwork on white / light
+                // backgrounds (Photos flower, VS Code, ...).
+                //
+                // Fallback for monochrome icons where artwork and background
+                // share hues (gray Settings gear on a gray gradient): the
+                // flood leaks into the artwork (bg fraction ~1.0) or finds
+                // nothing (bg fraction ~0.0). Then we separate via the
+                // brightness-seed artwork mask instead.
+                let bg_mask = IconCanvas::background_mask(&src);
+                let opaque_total = src.pixels().filter(|p| p[3] >= 128).count().max(1);
+                let bg_count = bg_mask
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, b)| {
+                        **b && src.get_pixel(
+                            (*i % src.width() as usize) as u32,
+                            (*i / src.width() as usize) as u32,
+                        )[3] >= 128
+                    })
+                    .count();
+                let bg_fraction = bg_count as f32 / opaque_total as f32;
+
+                if bg_fraction > 0.05 && bg_fraction < 0.90 {
+                    let mut options = ProcessOptions {
+                        recolor: None,
+                        background_replace: Some(DARK_BACKGROUND),
+                        depth: default_app_icon_depth(),
+                        protect_background: false,
+                    };
+                    options.recolor = Some(match self.tint {
+                        Some(tint) => RecolorOptions::new(tint, 1.0)
+                            .mode(RecolorMode::Shaded)
+                            .protect(DARK_BACKGROUND)
+                            .remap(Color::WHITE, DARK_BACKGROUND)
+                            .remap_tolerance(0.25)
+                            .remap_max_fraction(DARK_REMAP_MAX_FRACTION),
+                        None =>
+                        // intensity 0 = pass-through; only the size-gated
+                        // white->background remap takes effect (tolerance
+                        // 0.25 includes AA fringe around holes).
                         RecolorOptions::new(Color::WHITE, 0.0)
                             .remap(Color::WHITE, DARK_BACKGROUND)
+                            .remap_tolerance(0.25)
                             .remap_max_fraction(DARK_REMAP_MAX_FRACTION),
-                });
+                    });
+                    return Ok(IconCanvas::process_image(&src, &options));
+                }
+
+                // Fallback: brightness-seed artwork mask for gray-on-gray.
+                let w = src.width() as usize;
+                let h = src.height() as usize;
+                let total = w * h;
+
+                let brightness = |x: usize, y: usize| -> f32 {
+                    let p = src.get_pixel(x as u32, y as u32);
+                    (p[0] as f32 + p[1] as f32 + p[2] as f32) / 3.0 / 255.0
+                };
+
+                let mut seen = vec![false; total];
+                let mut artwork_mask = vec![false; total];
+
+                // Phase 1: seed from white-only pixels (v > 0.8).
+                // These are unambiguously part of the artwork.
+                let mut seeds = Vec::new();
+                for y in 0..h {
+                    for x in 0..w {
+                        let p = src.get_pixel(x as u32, y as u32);
+                        if p[3] < 20 { continue; }
+                        if brightness(x, y) > 0.8 {
+                            seeds.push((x, y));
+                        }
+                    }
+                }
+
+                // Phase 2: flood-expand from seeds through connected
+                // non-dark pixels (v > 0.15) with a strict chain threshold
+                // (0.08). This follows the gear body's gradient without
+                // crossing into the background gradient (which has a
+                // different color trajectory).
+                for (sx, sy) in seeds {
+                    let si = sy * w + sx;
+                    if seen[si] { continue; }
+                    let mut stack = vec![(sx, sy)];
+                    seen[si] = true;
+                    while let Some((cx, cy)) = stack.pop() {
+                        artwork_mask[cy * w + cx] = true;
+                        let cv = brightness(cx, cy);
+                        for (dx, dy) in [(-1i64, 0i64), (1, 0), (0, -1), (0, 1)] {
+                            let nx = cx as i64 + dx;
+                            let ny = cy as i64 + dy;
+                            if nx < 0 || ny < 0 || nx >= w as i64 || ny >= h as i64 { continue; }
+                            let (nx, ny) = (nx as usize, ny as usize);
+                            let ni = ny * w + nx;
+                            if seen[ni] { continue; }
+                            let p = src.get_pixel(nx as u32, ny as u32);
+                            if p[3] < 20 { continue; }
+                            let nv = brightness(nx, ny);
+                            if nv < 0.15 { continue; }
+                            let diff = (cv - nv).abs();
+                            if diff < 0.08 {
+                                seen[ni] = true;
+                                stack.push((nx, ny));
+                            }
+                        }
+                    }
+                }
+
+                // Build the dark-background image.
+                let mut work = RgbaImage::from_pixel(CANVAS_SIZE, CANVAS_SIZE, Rgba([0, 0, 0, 0]));
+                for y in 0..h {
+                    for x in 0..w {
+                        let p = src.get_pixel(x as u32, y as u32);
+                        if p[3] < 3 { continue; }
+                        let idx = y * w + x;
+                        if artwork_mask[idx] {
+                            work.put_pixel(x as u32, y as u32, *p);
+                        } else {
+                            work.put_pixel(x as u32, y as u32, Rgba([
+                                (DARK_BACKGROUND.r * 255.0).round() as u8,
+                                (DARK_BACKGROUND.g * 255.0).round() as u8,
+                                (DARK_BACKGROUND.b * 255.0).round() as u8,
+                                p[3],
+                            ]));
+                        }
+                    }
+                }
+
+                // Apply tint if set.
+                if let Some(tint) = self.tint {
+                    let mask = IconCanvas::background_mask(&work);
+                    let recolor = RecolorOptions::new(tint, 1.0)
+                        .mode(RecolorMode::Shaded)
+                        .protect(DARK_BACKGROUND);
+                    work = IconCanvas::recolor_pixels(&work, &recolor, Some(&mask));
+                }
+
+                // Apply depth effects.
+                let mut canvas = RgbaImage::from_pixel(CANVAS_SIZE, CANVAS_SIZE, Rgba([0, 0, 0, 0]));
+                let d = &default_app_icon_depth();
+
+                for (px, py, pixel) in work.enumerate_pixels() {
+                    if pixel[3] > 0 {
+                        canvas.put_pixel(px, py, *pixel);
+                    }
+                }
+
+                IconCanvas::apply_depth_effects(&mut canvas, d);
+                Ok(canvas)
             }
         }
-
-        Ok(IconCanvas::process_image(&src, &options))
     }
 
     /// Process and write a PNG to `path`.
@@ -775,9 +921,11 @@ impl IconCanvas {
         }
         if let Some(recolor) = &options.recolor {
             let mask = if options.protect_background {
-                // Strict thresholds: this mask exists to *skip* pixels, so a
-                // false positive would silently drop artwork from the tint.
-                Some(Self::background_mask_with(&work, 0.16, 0.14))
+                // Standard flood mask: background stays untouched while every
+                // foreground pixel (including anti-aliased logo fringe) is
+                // tinted. The flood is alpha-aware, so the 1px AA edge ring
+                // does not block it from reaching shaded background glass.
+                Some(Self::background_mask(&work))
             } else {
                 None
             };
@@ -880,10 +1028,7 @@ impl IconCanvas {
         let mask = Self::background_mask(rgba);
         let w = rgba.width() as usize;
         let h = rgba.height() as usize;
-        let (rr, rg, rb) = Self::border_reference(rgba);
-        let dist = |a: (f32, f32, f32), b: (f32, f32, f32)| -> f32 {
-            ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2) + (a.2 - b.2).powi(2)).sqrt()
-        };
+        let palette = Self::border_palette(rgba);
         let near_bg = |x: usize, y: usize| -> bool {
             let x0 = x.saturating_sub(2);
             let x1 = (x + 2).min(w - 1);
@@ -948,23 +1093,26 @@ impl IconCanvas {
             );
             // Decontaminate fringe: blends of artwork over the OLD background
             // become the same blend over the NEW background.
-            if near_bg(px as usize, py as usize) && dist(c, (rr, rg, rb)) < 0.55 {
-                if let Some(fg) = nearest_kept(px as usize, py as usize) {
-                    let fr = (fg.0 - rr, fg.1 - rg, fg.2 - rb);
-                    let denom = fr.0 * fr.0 + fr.1 * fr.1 + fr.2 * fr.2;
-                    let alpha = if denom < 0.0001 {
-                        0.0
-                    } else {
-                        (((c.0 - rr) * fr.0 + (c.1 - rg) * fr.1 + (c.2 - rb) * fr.2) / denom)
-                            .clamp(0.0, 1.0)
-                    };
-                    out.put_pixel(px, py, Rgba([
-                        ((fg.0 * alpha + tr * (1.0 - alpha)) * 255.0).round().clamp(0.0, 255.0) as u8,
-                        ((fg.1 * alpha + tg * (1.0 - alpha)) * 255.0).round().clamp(0.0, 255.0) as u8,
-                        ((fg.2 * alpha + tb * (1.0 - alpha)) * 255.0).round().clamp(0.0, 255.0) as u8,
-                        a,
-                    ]));
-                    continue;
+            let bg_centroid = Self::closest_palette_centroid(&palette, c, 0.55);
+            if near_bg(px as usize, py as usize) {
+                if let Some((rr, rg, rb)) = bg_centroid {
+                    if let Some(fg) = nearest_kept(px as usize, py as usize) {
+                        let fr = (fg.0 - rr, fg.1 - rg, fg.2 - rb);
+                        let denom = fr.0 * fr.0 + fr.1 * fr.1 + fr.2 * fr.2;
+                        let alpha = if denom < 0.0001 {
+                            0.0
+                        } else {
+                            (((c.0 - rr) * fr.0 + (c.1 - rg) * fr.1 + (c.2 - rb) * fr.2) / denom)
+                                .clamp(0.0, 1.0)
+                        };
+                        out.put_pixel(px, py, Rgba([
+                            ((fg.0 * alpha + tr * (1.0 - alpha)) * 255.0).round().clamp(0.0, 255.0) as u8,
+                            ((fg.1 * alpha + tg * (1.0 - alpha)) * 255.0).round().clamp(0.0, 255.0) as u8,
+                            ((fg.2 * alpha + tb * (1.0 - alpha)) * 255.0).round().clamp(0.0, 255.0) as u8,
+                            a,
+                        ]));
+                        continue;
+                    }
                 }
             }
             out.put_pixel(px, py, *pixel);
@@ -972,78 +1120,262 @@ impl IconCanvas {
         out
     }
 
-    /// Reference color of the image border: average of the outermost 1px.
-    fn border_reference(rgba: &RgbaImage) -> (f32, f32, f32) {
+    /// Palette of corner background colors, used for flood-fill reference.
+    ///
+    /// Only fully opaque pixels (`alpha >= 128`) inside the four corner
+    /// squares (side `min(w,h)/12`, at least 8px) contribute. Corners are
+    /// almost always background: flat artwork that bleeds to the straight
+    /// edges (VS Code X) never reaches the corners, and the 1px AA / shadow
+    /// ring on glassed icons is skipped via the alpha gate. Edge-touching
+    /// artwork therefore never poisons the palette. Uses 4-bit quantization
+    /// per channel (16 levels) to group nearby gradients into one bucket.
+    /// Returns up to 6 dominant entries sorted by frequency, so callers can
+    /// match each flood pixel to the correct gradient zone (glass shade
+    /// steps, grid hues). Falls back to mean RGB when no opaque pixels exist.
+    fn border_palette(rgba: &RgbaImage) -> Vec<BorderPaletteEntry> {
         let w = rgba.width() as usize;
         let h = rgba.height() as usize;
+        // 4-bit quantized bins: 16^3 = 4096 possible bins.
+        let mut bins = [0u32; 4096];
+        let mut total = 0u64;
         let mut rr = 0u64;
         let mut rg = 0u64;
         let mut rb = 0u64;
-        let mut n = 0u64;
-        let mut acc = |p: &Rgba<u8>| {
+
+        let mut scan = |p: &Rgba<u8>| {
+            if p[3] < 128 { return; }
+            let r = p[0] as usize;
+            let g = p[1] as usize;
+            let b = p[2] as usize;
+            // 4-bit quantization: r >> 4 gives 0..15.
+            let bin = (r >> 4) * 256 + (g >> 4) * 16 + (b >> 4);
+            bins[bin] += 1;
             rr += p[0] as u64;
             rg += p[1] as u64;
             rb += p[2] as u64;
-            n += 1;
+            total += 1;
         };
-        for x in 0..w {
-            acc(rgba.get_pixel(x as u32, 0));
-            acc(rgba.get_pixel(x as u32, h as u32 - 1));
+        // Corner squares: side min(w,h)/12 (85px at 1024), at least 8px.
+        // Artwork that touches straight edges never reaches here.
+        let cs = (w.min(h) / 12).max(8).min(w.min(h));
+        for y in 0..cs {
+            for x in 0..cs {
+                scan(rgba.get_pixel(x as u32, y as u32)); // top-left
+                scan(rgba.get_pixel((w - 1 - x) as u32, y as u32)); // top-right
+                scan(rgba.get_pixel(x as u32, (h - 1 - y) as u32)); // bottom-left
+                scan(rgba.get_pixel((w - 1 - x) as u32, (h - 1 - y) as u32)); // bottom-right
+            }
         }
-        for y in 0..h {
-            acc(rgba.get_pixel(0, y as u32));
-            acc(rgba.get_pixel(w as u32 - 1, y as u32));
+
+        if total == 0 {
+            return vec![BorderPaletteEntry {
+                r: 0.5, g: 0.5, b: 0.5, count: 1,
+            }];
         }
-        (
-            rr as f32 / 255.0 / n as f32,
-            rg as f32 / 255.0 / n as f32,
-            rb as f32 / 255.0 / n as f32,
-        )
+
+        // Sort bins by frequency, take the top 6 to cover shaded glass
+        // gradients (white, light/mid/dark gray) plus grid-line hues.
+        let mut indexed: Vec<(usize, u32)> = bins.iter().enumerate().map(|(i, &c)| (i, c)).collect();
+        indexed.sort_by(|a, b| b.1.cmp(&a.1));
+
+        let mut entries = Vec::new();
+        for &(idx, count) in indexed.iter().take(6) {
+            if count == 0 { continue; }
+            let r = ((idx / 256) as f32 * 16.0 + 8.0) / 255.0;
+            let g = (((idx / 16) % 16) as f32 * 16.0 + 8.0) / 255.0;
+            let b = ((idx % 16) as f32 * 16.0 + 8.0) / 255.0;
+            entries.push(BorderPaletteEntry {
+                r, g, b, count: count as usize,
+            });
+        }
+
+        if entries.is_empty() {
+            entries.push(BorderPaletteEntry {
+                r: rr as f32 / 255.0 / total as f32,
+                g: rg as f32 / 255.0 / total as f32,
+                b: rb as f32 / 255.0 / total as f32,
+                count: total as usize,
+            });
+        }
+        entries
+    }
+
+    /// Euclidean distance between two colors in 0..1 RGB space.
+    fn color_dist(a: (f32, f32, f32), b: (f32, f32, f32)) -> f32 {
+        ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2) + (a.2 - b.2).powi(2)).sqrt()
+    }
+
+    /// Find the nearest palette centroid for a color, or `None` if no
+    /// palette entry is within `max_dist`.
+    fn closest_palette_centroid(
+        palette: &[BorderPaletteEntry],
+        color: (f32, f32, f32),
+        max_dist: f32,
+    ) -> Option<(f32, f32, f32)> {
+        let mut best: Option<(f32, f32, f32, f32)> = None;
+        for entry in palette {
+            let d = Self::color_dist(color, (entry.r, entry.g, entry.b));
+            if d < max_dist {
+                if best.is_none() || d < best.unwrap().3 {
+                    best = Some((entry.r, entry.g, entry.b, d));
+                }
+            }
+        }
+        best.map(|(r, g, b, _)| (r, g, b))
     }
 
     /// Compute the border-connected background mask (true = background),
     /// with the standard (swap-oriented) thresholds.
+    ///
+    /// Compute the border-connected background mask (true = background),
+    /// with the standard (swap-oriented) thresholds.
+    ///
+    /// Reference `0.25` matches shaded glass backgrounds to the border
+    /// palette while rejecting saturated artwork (a purple petal is 0.31
+    /// from light gray; `0.32` leaked, `0.20` split the background gradient
+    /// itself). Chain `0.14` stops the flood at artwork edges. Gradient
+    /// backgrounds still propagate (per-pixel steps ~0.01).
     fn background_mask(rgba: &RgbaImage) -> Vec<bool> {
-        Self::background_mask_with(rgba, 0.32, 0.25)
+        Self::background_mask_with(rgba, 0.25, 0.14)
     }
 
-    /// Compute the border-connected background mask (true = background).
+    /// Border-connected background mask with transparent-border awareness.
     ///
-    /// Robust against soft logo edges: a pixel joins the background only when
-    /// it is close to the border reference color AND close to its neighbour -
-    /// a pure neighbour chain would leak through anti-aliased gradients into
-    /// the artwork. One dilation pass pulls low-saturation halo pixels into
-    /// the mask so the swapped background has no bright fringe.
-    fn background_mask_with(rgba: &RgbaImage, ref_threshold: f32, chain_threshold: f32) -> Vec<bool> {
+    /// For icons with transparent corners (rounded squircles), the palette
+    /// approach incorrectly absorbs gradient artwork that shares hues with
+    /// the background. This variant seeds the flood exclusively from
+    /// transparent border pixels (alpha < 3) and propagates only through
+    /// near-transparent / low-alpha chain neighbors, so the gradient
+    /// artwork is never touched.
+    fn transparent_background_mask(rgba: &RgbaImage) -> Vec<bool> {
         let w = rgba.width() as usize;
         let h = rgba.height() as usize;
         let mut is_bg = vec![false; w * h];
         let mut queue: std::collections::VecDeque<(usize, usize)> = std::collections::VecDeque::new();
 
-        // Reference colour: average of the outermost border.
-        let (ref_r, ref_g, ref_b) = Self::border_reference(rgba);
-
-        let dist = |a: (f32, f32, f32), b: (f32, f32, f32)| -> f32 {
-            ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2) + (a.2 - b.2).powi(2)).sqrt()
-        };
-        let color_at = |x: usize, y: usize| -> (f32, f32, f32) {
-            let p = rgba.get_pixel(x as u32, y as u32);
-            (p[0] as f32 / 255.0, p[1] as f32 / 255.0, p[2] as f32 / 255.0)
-        };
-
+        // Seed: all fully transparent border pixels.
         for x in 0..w {
-            queue.push_back((x, 0));
-            queue.push_back((x, h - 1));
+            if rgba.get_pixel(x as u32, 0)[3] < 3 { queue.push_back((x, 0)); }
+            if rgba.get_pixel(x as u32, (h - 1) as u32)[3] < 3 { queue.push_back((x, h - 1)); }
         }
         for y in 1..h - 1 {
-            queue.push_back((0, y));
-            queue.push_back((w - 1, y));
+            if rgba.get_pixel(0, y as u32)[3] < 3 { queue.push_back((0, y)); }
+            if rgba.get_pixel((w - 1) as u32, y as u32)[3] < 3 { queue.push_back((w - 1, y)); }
         }
 
         while let Some((x, y)) = queue.pop_front() {
             let idx = y * w + x;
             if is_bg[idx] { continue; }
-            if dist(color_at(x, y), (ref_r, ref_g, ref_b)) >= ref_threshold { continue; }
+            let a = rgba.get_pixel(x as u32, y as u32)[3];
+            if a > 8 { continue; }
+            is_bg[idx] = true;
+
+            for (dx, dy) in [(-1i64, 0i64), (1, 0), (0, -1), (0, 1)] {
+                let nx = x as i64 + dx;
+                let ny = y as i64 + dy;
+                if nx < 0 || ny < 0 || nx >= w as i64 || ny >= h as i64 { continue; }
+                let (nx, ny) = (nx as usize, ny as usize);
+                if !is_bg[ny * w + nx] {
+                    queue.push_back((nx, ny));
+                }
+            }
+        }
+
+        // Dilation: absorb very faint fringe pixels (alpha <= 20) that
+        // touch the transparent background on at least two sides.
+        let mut halo = vec![false; w * h];
+        for y in 1..h - 1 {
+            for x in 1..w - 1 {
+                let idx = y * w + x;
+                if is_bg[idx] { continue; }
+                let a = rgba.get_pixel(x as u32, y as u32)[3];
+                if a > 20 { continue; }
+                let mut bg_neighbors = 0;
+                for (dx, dy) in [(-1i64, 0i64), (1, 0), (0, -1), (0, 1)] {
+                    let ni = (y as i64 + dy) as usize * w + (x as i64 + dx) as usize;
+                    if is_bg[ni] { bg_neighbors += 1; }
+                }
+                if bg_neighbors >= 2 { halo[idx] = true; }
+            }
+        }
+
+        for i in 0..is_bg.len() { is_bg[i] = is_bg[i] || halo[i]; }
+        is_bg
+    }
+
+    /// Compute the border-connected background mask (true = background).
+    ///
+    /// Uses a palette of the dominant opaque border colors instead of a
+    /// single average, so gradient backgrounds with transparent corners
+    /// (e.g. Settings gear) flood-fill correctly to the edge. A pixel
+    /// joins the background when it is close to any palette centroid AND
+    /// close to its chain neighbor. One dilation pass pulls low-chroma
+    /// halo pixels into the mask so the swapped background has no fringe.
+    fn background_mask_with(rgba: &RgbaImage, ref_threshold: f32, chain_threshold: f32) -> Vec<bool> {
+        let w = rgba.width() as usize;
+        let h = rgba.height() as usize;
+        let mut is_bg = vec![false; w * h];
+        let mut seen_bg = vec![false; w * h];
+        let mut queue: std::collections::VecDeque<(usize, usize)> = std::collections::VecDeque::new();
+
+        let palette = Self::border_palette(rgba);
+
+        let alpha_at = |x: usize, y: usize| -> u8 {
+            rgba.get_pixel(x as u32, y as u32)[3]
+        };
+        let color_at = |x: usize, y: usize| -> (f32, f32, f32) {
+            let p = rgba.get_pixel(x as u32, y as u32);
+            (p[0] as f32 / 255.0, p[1] as f32 / 255.0, p[2] as f32 / 255.0)
+        };
+        let near_palette = |c: (f32, f32, f32), threshold: f32| -> bool {
+            Self::closest_palette_centroid(&palette, c, threshold).is_some()
+        };
+
+        // Seeds: full border (outer + 1px inset for AA rings). Pixels are
+        // gated by the corner palette at pop time, so edge-touching artwork
+        // never seeds the flood with its own colors, while every
+        // border-connected background compartment gets its own seeds
+        // (grid-partitioned backgrounds need edge seeds, corners alone
+        // would miss compartments).
+        for x in 0..w {
+            queue.push_back((x, 0));
+            queue.push_back((x, h - 1));
+            if h > 2 {
+                queue.push_back((x, 1));
+                queue.push_back((x, h - 2));
+            }
+        }
+        for y in 1..h - 1 {
+            queue.push_back((0, y));
+            queue.push_back((w - 1, y));
+            if w > 2 {
+                queue.push_back((1, y));
+                queue.push_back((w - 2, y));
+            }
+        }
+
+        while let Some((x, y)) = queue.pop_front() {
+            let idx = y * w + x;
+            if seen_bg[idx] { continue; }
+            seen_bg[idx] = true;
+            if is_bg[idx] { continue; }
+            // Transparent / feathered edge pixels are never background
+            // themselves, but the flood must pass *through* them to reach
+            // the first opaque row (the 1px AA ring would otherwise block
+            // the entire flood).
+            if alpha_at(x, y) < 128 {
+                for (dx, dy) in [(-1i64, 0i64), (1, 0), (0, -1), (0, 1)] {
+                    let nx = x as i64 + dx;
+                    let ny = y as i64 + dy;
+                    if nx < 0 || ny < 0 || nx >= w as i64 || ny >= h as i64 { continue; }
+                    let (nx, ny) = (nx as usize, ny as usize);
+                    if !seen_bg[ny * w + nx] {
+                        queue.push_back((nx, ny));
+                    }
+                }
+                continue;
+            }
+            if !near_palette(color_at(x, y), ref_threshold) { continue; }
             is_bg[idx] = true;
 
             for (dx, dy) in [(-1i64, 0i64), (1, 0), (0, -1), (0, 1)] {
@@ -1052,22 +1384,27 @@ impl IconCanvas {
                 if nx < 0 || ny < 0 || nx >= w as i64 || ny >= h as i64 { continue; }
                 let (nx, ny) = (nx as usize, ny as usize);
                 let nidx = ny * w + nx;
-                if is_bg[nidx] { continue; }
-                if dist(color_at(nx, ny), color_at(x, y)) < chain_threshold {
+                if seen_bg[nidx] { continue; }
+                if alpha_at(nx, ny) < 128 {
+                    queue.push_back((nx, ny));
+                    continue;
+                }
+                if Self::color_dist(color_at(nx, ny), color_at(x, y)) < chain_threshold {
                     queue.push_back((nx, ny));
                 }
             }
         }
 
-        // Dilation: absorb anti-aliased fringe pixels (near-reference, low
-        // chroma) that touch the background on at least two sides.
+        // Dilation: absorb anti-aliased fringe pixels (near any palette
+        // centroid, low chroma) that touch the background on at least two
+        // sides.
         let mut halo = vec![false; w * h];
         for y in 1..h - 1 {
             for x in 1..w - 1 {
                 let idx = y * w + x;
                 if is_bg[idx] { continue; }
                 let c = color_at(x, y);
-                if dist(c, (ref_r, ref_g, ref_b)) >= 0.60 { continue; }
+                if !near_palette(c, 0.60) { continue; }
                 let chroma = c.0.max(c.1).max(c.2) - c.0.min(c.1).min(c.2);
                 if chroma > 0.18 { continue; }
                 let mut bg_neighbors = 0;
@@ -1172,6 +1509,13 @@ impl IconCanvas {
         for (px, py, pixel) in rgba.enumerate_pixels() {
             if let Some(mask) = bg_mask {
                 if mask[py as usize * w + px as usize] {
+                    out.put_pixel(px, py, *pixel);
+                    continue;
+                }
+                // Feathered edge pixels (old 1px AA ring) are background-side:
+                // keep them original so the new pixel-correct corner mask
+                // turns them opaque background instead of a tinted fringe.
+                if pixel[3] < 128 {
                     out.put_pixel(px, py, *pixel);
                     continue;
                 }
@@ -1373,6 +1717,8 @@ impl IconCanvas {
                     let (sdf, _) =
                         Self::rounded_rect_sdf_normal(px as f32 + 0.5, py as f32 + 0.5, size, size, r);
                     if sdf >= 0.5 { continue; }
+                    let pixel = img.get_pixel(px, py);
+                    if pixel[3] < 10 { continue; }
                     let u = px as f32 / size;
                     // Slightly stronger toward the light side.
                     let light_side = 1.0 - ((u - 0.5) - d.light_x * 0.18).abs() * 0.55;
@@ -1398,6 +1744,7 @@ impl IconCanvas {
                     let (sdf, _) =
                         Self::rounded_rect_sdf_normal(px as f32 + 0.5, py as f32 + 0.5, size, size, r);
                     if sdf >= 0.0 || -sdf > blur { continue; }
+                    if img.get_pixel(px, py)[3] < 10 { continue; }
                     // Darkness grows away from the light (planar gradient).
                     let darkness = (0.5
                         - ((px as f32 + 0.5) / size - 0.5) * d.light_x
@@ -1423,6 +1770,7 @@ impl IconCanvas {
                     let (sdf, _) =
                         Self::rounded_rect_sdf_normal(px as f32 + 0.5, py as f32 + 0.5, size, size, r);
                     if sdf >= 0.0 { continue; }
+                    if img.get_pixel(px, py)[3] < 10 { continue; }
                     if row_a < 0.012 { continue; }
                     Self::blend_pixel(img, px, py, Rgba([0, 0, 0, (row_a * 255.0).round() as u8]));
                 }
@@ -1461,15 +1809,19 @@ impl IconCanvas {
             }
         }
 
-        // Anti-aliased corner mask (1.5px feather, no jaggies).
+        // Anti-aliased corner mask (1px feather, pixel-correct).
+        // Pixel centers 0.5px inside the edge are fully covered; only texels
+        // straddling the edge fade. The old 1.5px feather left a translucent
+        // 1px ring around the whole icon (edge centers at sdf=-0.5 got 33%
+        // alpha), which read as a dark fringe and blocked flood fills.
         for py in 0..CANVAS_SIZE {
             for px in 0..CANVAS_SIZE {
                 let (sdf, _) =
                     Self::rounded_rect_sdf_normal(px as f32 + 0.5, py as f32 + 0.5, size, size, r);
-                if sdf >= 0.0 {
+                if sdf >= 0.5 {
                     img.put_pixel(px, py, Rgba([0, 0, 0, 0]));
-                } else if sdf > -1.5 {
-                    let coverage = (-sdf / 1.5).clamp(0.0, 1.0);
+                } else if sdf > -0.5 {
+                    let coverage = (0.5 - sdf).clamp(0.0, 1.0);
                     let p = img.get_pixel(px, py);
                     let a = (p[3] as f32 / 255.0 * coverage * 255.0).round().clamp(0.0, 255.0) as u8;
                     img.put_pixel(px, py, Rgba([p[0], p[1], p[2], a]));

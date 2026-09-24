@@ -78,8 +78,8 @@ The render order is:
 3. Frosted wash (if enabled)
 4. Light-steered glass effects: vibrancy, specular rim, top gloss + sheen,
    inner depth, bottom shade, gradient edge stroke
-5. Anti-aliased corner mask (1.5px feather, everything outside the rounded
-   rect becomes transparent)
+5. Anti-aliased corner mask (1px feather, pixel-correct: edge centers stay
+   fully opaque, only texels straddling the edge fade)
 
 ### Liquid Glass preset
 
@@ -326,9 +326,14 @@ pub struct ProcessOptions {
 ```
 
 `protect_background: true` excludes the flood-filled background region from
-recoloring (computed with strict thresholds so gray artwork is still tinted).
-This is how `AppIcon` Light+tint colors monochrome artwork while keeping the
-original background.
+recoloring. The mask uses reference `0.25` / chain `0.14`: strict enough to
+reject saturated artwork (a purple petal is `0.31` from light gray) while still
+spanning shaded glass gradients. The border palette is built from the 1px-inset
+border with fully opaque pixels only (`alpha >= 128`), so the AA edge ring
+never poisons it, and the flood passes through transparent edge texels to the
+first opaque row. Feathered edge texels (`alpha < 128`) are always protected,
+so old AA rings never tint into a fringe. This is how `AppIcon` Light+tint
+colors artwork while keeping the original background.
 
 ### `DepthOptions`
 
@@ -651,14 +656,18 @@ pub fn dark_light_mode(
 ```
 
 Loads the source image, detects the background region with a flood fill seeded
-from the image edges, then replaces every background pixel with a solid color
+from the image edges (plus 1px-inset seeds so AA rings never block entry),
+then replaces every background pixel with a solid color
 (see `IconMode`). Foreground pixels are kept as-is. Depth effects are applied
 on top. Implemented via [`set_background_color`](#set_background_color).
 
-The flood fill starts from all four border edges against a 2px-border
-reference color. A 4-connected neighbor joins the background when it is close
-to the reference (`0.32`) and close to its chain neighbor (`0.25`), which
-keeps the fill from leaking through soft logo edges. One dilation pass
+The flood fill uses a 6-entry quantized corner palette (opaque pixels in the
+four corner squares only) instead of a single average. Corners are almost
+always background, so edge-touching artwork (VS Code X) never poisons the
+palette. A 4-connected neighbor joins the background
+when it is close to any palette centroid (`0.25`) and close to its chain
+neighbor (`0.14`), which keeps the fill from leaking into saturated artwork
+through soft logo edges. One dilation pass
 absorbs low-chroma halo pixels so the swapped background has no bright
 fringe. Any pixel not reached by the fill is treated as foreground.
 

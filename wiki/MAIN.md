@@ -64,6 +64,17 @@ See [Generator.md](Generator.md), [Color.md](Color.md) and
 
 ## Changelog
 
+- 2026-09-24: AppIcon tint + background-mask overhaul: Light+tint now uses
+  luminance-graded `Shaded` (uniform hue, overlaps stay darker) instead of
+  `Colorize` (which washed yellows pale and greens dark); Dark uses the
+  standard flood swap with a brightness-seed fallback for gray-on-gray gears;
+  flood is alpha-aware (inset opaque palette, pass-through transparent ring,
+  feathered texels always protected) with reference `0.25` / chain `0.14`;
+  corner mask is pixel-correct 1px (no more translucent edge ring); Dark
+  white-remap tolerance `0.25` absorbs hole fringe; border palette uses
+  corner squares only (up to 6 entries) so edge-touching artwork never
+  poisons it. Verified on the Photos
+  flower: uniform tints, dark mode keeps colors, no fringe.
 - 2026-09-11: LiveOS runtime paths: new resolvers `resolve_icon_dir`,
   `resolve_icon_path`, `octopus::resolve_octopus_dir`,
   `octopus::resolve_octopus_path` and `os_version::resolve_os_version_base`

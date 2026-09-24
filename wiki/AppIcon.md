@@ -66,8 +66,8 @@ Default equals API 1. Options combine freely:
 | Call chain | Background | Artwork |
 |---|---|---|
 | `from_file(..)` | Original | Original colors + vibrancy pop + full Apple glass finish |
-| `.. .dark()` | TontooOS dark `#1d1d1d` | Original colors preserved (a blue VS Code logo stays blue); white interior cutouts follow the background |
-| `.. .tint(c)` (Light) | Original (untouched) | HSL colorize toward `c`; grays / whites / blacks are protected |
+| `.. .dark()` | TontooOS dark `#1d1d1d` | Original colors preserved (a blue VS Code logo stays blue); small white interior cutouts follow the background (size-gated remap, tolerance `0.25`) |
+| `.. .tint(c)` (Light) | Original (untouched) | Luminance-graded `Shaded` replacement toward `c`: all petals share one hue while overlaps stay darker; background (incl. shaded glass) is flood-protected |
 | `.. .dark().tint(c)` | TontooOS dark `#1d1d1d` | Luminance-graded `Shaded` replacement toward `c`; interior cutouts follow the background |
 
 The Apple glass finish (`gloss 0.24`, `vibrancy 0.22`, `specular 0.50`,
@@ -82,12 +82,15 @@ Returns `Err` when the source file cannot be opened or decoded.
 
 ### How the dark mode keeps colors
 
-`Appearance::Dark` swaps the flood-filled background to `DARK_BACKGROUND`
-and then runs a pass-through recolor (`intensity 0`) whose only active rule
-is a size-gated `remap(white -> dark background)` limited by
-`DARK_REMAP_MAX_FRACTION` (`0.10`). Small white holes / cutouts therefore
-blend into the background instead of glowing, while large white foreground
-shapes (glyphs, bubbles) and every other pixel keep their original hue.
+`Appearance::Dark` first tries the standard flood-fill background swap to
+`DARK_BACKGROUND` plus a size-gated `remap(white -> dark background)` limited
+by `DARK_REMAP_MAX_FRACTION` (`0.10`, tolerance `0.25` so AA fringe around
+holes follows too). Small white holes / cutouts therefore blend into the
+background instead of glowing, while large white foreground shapes (glyphs,
+bubbles) and every other pixel keep their original hue. The background is
+only swapped when the flood fraction looks sane (`0.05`–`0.90`); for
+monochrome icons where artwork and background share hues (gray Settings gear
+on a gray gradient) it falls back to a brightness-seed artwork mask instead.
 
 ## Usage / Example
 
