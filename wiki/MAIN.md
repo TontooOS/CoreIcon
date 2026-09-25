@@ -65,6 +65,12 @@ See [Generator.md](Generator.md), [Color.md](Color.md) and
 
 ## Changelog
 
+- 2026-09-25: New `Layer.shaded` flag (default `false`) with `.shaded(b)`
+  builder: `shaded: true` tints `Icon`/`Image` layers with the source
+  brightness as mask (white maps to the full tint, darker pixels shade toward
+  black) so authored gradients in recolorable artwork survive; `false` keeps
+  the flat alpha-mask replace used by black SF Symbol masks. Covered by
+  `tests/shaded_tint.rs`. See [Generator.md](Generator.md).
 - 2026-09-24: Added TICO (`.tico` icon container): plain ZIP named `*.tico`
   with `manifest.json` + `layer/NN.tlyr` custom layer files (no preview, no
   PNG files); `Tico::export` rasterizes `IconCanvas` layers at 1024px,

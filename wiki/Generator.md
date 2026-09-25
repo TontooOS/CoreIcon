@@ -126,6 +126,7 @@ pub struct Layer {
     pub height: f32,
     pub fill: Option<Color>,
     pub gradient: Option<Gradient>,
+    pub shaded: bool,
     pub tint_matrix: Option<TintMatrix>,
     pub opacity: f32,
     pub shadow: Option<Shadow>,
@@ -142,6 +143,7 @@ pub struct Layer {
 | `.size(w, h)` | Element dimensions |
 | `.tint(c)` | Solid color fill |
 | `.gradient(g)` | Gradient fill (overrides tint) |
+| `.shaded(b)` | Shaded tint mode (default `false`); see below |
 | `.tint_matrix(m)` | Color-matrix recolor applied after fill/gradient (see [TintMatrix.md](TintMatrix.md)) |
 | `.opacity(o)` | Clamped to `[0.0, 1.0]` |
 | `.shadow(s)` | Shadow drawn before the element |
@@ -149,6 +151,21 @@ pub struct Layer {
 
 > **Note:** `gradient` and `tint` are mutually exclusive on a single layer. If
 > both are set, `gradient` takes precedence during rasterization.
+
+### Flat vs shaded tint
+
+Tinting an `Icon` or `Image` layer with `fill` (or a per-row `gradient`) works
+in one of two modes, selected by `Layer.shaded` (default `false`):
+
+| Mode | Behavior | Use for |
+|---|---|---|
+| Flat (`shaded: false`) | RGB becomes the tint color, alpha is kept | SF Symbols (black alpha masks); any mask without internal shading |
+| Shaded (`shaded: true`) | Source brightness scales the tint: white maps to the full tint, darker pixels shade toward black | Raster artwork authored with a brightness gradient on white ground (e.g. recolorable `.tico` layers) |
+
+The modes cannot be distinguished from pixel values alone: `RGB 0,0,0` means
+"black SF Symbol mask, tint flat" in one case and "darkest point of a shading
+gradient" in the other. The layer flag decides explicitly. `Background::Image`
+tints and `Layer.tint_matrix` are unaffected.
 
 ## LayerContent
 

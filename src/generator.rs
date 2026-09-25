@@ -685,6 +685,11 @@ pub struct Layer {
     pub height: f32,
     pub fill: Option<Color>,
     pub gradient: Option<Gradient>,
+    /// When true, the source RGB is used as a brightness mask and shaded
+    /// toward `fill`/`gradient` instead of flat-replaced. For assets
+    /// authored with internal shading on a light/white ground (recolorable
+    /// `.tico` layers). SF Symbols (black alpha masks) stay at `false`.
+    pub shaded: bool,
     /// Color-matrix recolor applied after fill/gradient. Composes with
     /// `fill`/`gradient` (matrix runs last). See [`TintMatrix`].
     pub tint_matrix: Option<TintMatrix>,
@@ -703,6 +708,7 @@ impl Layer {
             height: 100.0,
             fill: None,
             gradient: None,
+            shaded: false,
             tint_matrix: None,
             opacity: 1.0,
             shadow: None,
@@ -714,6 +720,7 @@ impl Layer {
     pub fn size(mut self, w: f32, h: f32) -> Self { self.width = w; self.height = h; self }
     pub fn tint(mut self, c: Color) -> Self { self.fill = Some(c); self }
     pub fn gradient(mut self, g: Gradient) -> Self { self.gradient = Some(g); self }
+    pub fn shaded(mut self, shaded: bool) -> Self { self.shaded = shaded; self }
     pub fn tint_matrix(mut self, m: TintMatrix) -> Self { self.tint_matrix = Some(m); self }
     pub fn opacity(mut self, o: f32) -> Self { self.opacity = o.clamp(0.0, 1.0); self }
     pub fn shadow(mut self, s: Shadow) -> Self { self.shadow = Some(s); self }
@@ -2410,12 +2417,12 @@ impl IconCanvas {
             if dx < CANVAS_SIZE && dy < CANVAS_SIZE {
                 let mut p = *pixel;
                 if let Some(tint) = &layer.fill {
-                    p = Self::tint_pixel(p, *tint);
+                    p = if layer.shaded { Self::tint_pixel_shaded(p, *tint) } else { Self::tint_pixel(p, *tint) };
                 }
                 if let Some(gradient) = &layer.gradient {
                     let t = py as f32 / h as f32;
                     let c = Self::sample_gradient(gradient, t.clamp(0.0, 1.0));
-                    p = Self::tint_pixel(p, c);
+                    p = if layer.shaded { Self::tint_pixel_shaded(p, c) } else { Self::tint_pixel(p, c) };
                 }
                 if let Some(m) = &layer.tint_matrix {
                     p = Self::apply_matrix_to_pixel(m, p);
@@ -2439,7 +2446,7 @@ impl IconCanvas {
                 if dx < CANVAS_SIZE && dy < CANVAS_SIZE {
                     let mut p = *pixel;
                     if let Some(tint) = &layer.fill {
-                        p = Self::tint_pixel(p, *tint);
+                        p = if layer.shaded { Self::tint_pixel_shaded(p, *tint) } else { Self::tint_pixel(p, *tint) };
                     }
                     if let Some(m) = &layer.tint_matrix {
                         p = Self::apply_matrix_to_pixel(m, p);
@@ -2623,7 +2630,8 @@ impl IconCanvas {
     }
 
     fn tint_pixel(pixel: Rgba<u8>, tint: Color) -> Rgba<u8> {
-        // Use alpha channel as mask, replace RGB with tint color
+        // Use alpha channel as mask, replace RGB with tint color.
+        // Correct for black alpha masks (SF Symbols).
         let alpha = pixel[3] as f32 / 255.0;
         if alpha < 0.01 {
             return Rgba([0, 0, 0, 0]);
@@ -2632,6 +2640,24 @@ impl IconCanvas {
             (tint.r * 255.0).round() as u8,
             (tint.g * 255.0).round() as u8,
             (tint.b * 255.0).round() as u8,
+            (alpha * tint.a * 255.0).round() as u8,
+        ])
+    }
+
+    /// Like [`Self::tint_pixel`], but the source RGB brightness shades the
+    /// tint (white -> full tint, darker -> toward black). For assets with
+    /// authored shading on a white ground, e.g. recolorable `.tico` layers.
+    /// Selected per layer via [`Layer::shaded`].
+    fn tint_pixel_shaded(pixel: Rgba<u8>, tint: Color) -> Rgba<u8> {
+        let alpha = pixel[3] as f32 / 255.0;
+        if alpha < 0.01 {
+            return Rgba([0, 0, 0, 0]);
+        }
+        let src_l = (pixel[0] as f32 + pixel[1] as f32 + pixel[2] as f32) / (3.0 * 255.0);
+        Rgba([
+            (tint.r * src_l * 255.0).round() as u8,
+            (tint.g * src_l * 255.0).round() as u8,
+            (tint.b * src_l * 255.0).round() as u8,
             (alpha * tint.a * 255.0).round() as u8,
         ])
     }
