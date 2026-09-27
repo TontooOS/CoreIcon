@@ -6,7 +6,7 @@ renders 1024x1024 icon PNGs with colors, gradients, transparency, shadows,
 Liquid Glass post-processing and text.
 
 - Repository: https://github.com/TontooOS/CoreIcon
-- License: MIT
+- License: TCL
 - Version: 26.1.0
 
 ## Feature Index
