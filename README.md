@@ -2,6 +2,8 @@
 
 A Rust library for making app icons and using SF Icons in UIs
 
+Wiki: [wiki/MAIN.md](wiki/MAIN.md)
+
 ## Made for TontooOS
 
 Explore more at https://github.com/TontooOS/Libs

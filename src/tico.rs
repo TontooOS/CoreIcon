@@ -17,8 +17,9 @@
 // app-icon finish, then scales to the requested size.
 
 use crate::generator::{Background, IconCanvas, LayerContent, CANVAS_SIZE};
+use crate::img::{load_rgba, resize_fill};
 use crate::{Color, GradientDirection};
-use image::{Rgba, RgbaImage};
+use coreimage::{Rgba, RgbaImage};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::path::Path;
@@ -62,8 +63,8 @@ impl From<std::io::Error> for TicoError {
 impl From<serde_json::Error> for TicoError {
     fn from(e: serde_json::Error) -> Self { Self::Json(e.to_string()) }
 }
-impl From<image::ImageError> for TicoError {
-    fn from(e: image::ImageError) -> Self { Self::Image(e.to_string()) }
+impl From<coreimage::ImageError> for TicoError {
+    fn from(e: coreimage::ImageError) -> Self { Self::Image(e.to_string()) }
 }
 impl From<zip::result::ZipError> for TicoError {
     fn from(e: zip::result::ZipError) -> Self { Self::Zip(e.to_string()) }
@@ -101,10 +102,8 @@ struct Manifest {
 // ── TLYR layer files ────────────────────────────────────────────────
 
 fn encode_tlyr(img: &RgbaImage) -> Result<Vec<u8>, TicoError> {
-    let mut png = Vec::new();
-    let mut cursor = std::io::Cursor::new(&mut png);
-    image::DynamicImage::ImageRgba8(img.clone())
-        .write_to(&mut cursor, image::ImageFormat::Png)?;
+    let png = coreimage::codecs::png::encode(img.width(), img.height(), img.as_raw())
+        .map_err(|e| TicoError::Image(e.to_string()))?;
     let mut out = Vec::with_capacity(16 + png.len());
     out.extend_from_slice(TLYR_MAGIC);
     out.push(TLYR_VERSION);
@@ -132,7 +131,9 @@ fn decode_tlyr(bytes: &[u8]) -> Result<RgbaImage, TicoError> {
     if bytes.len() < 18 + len {
         return Err(TicoError::Format("tlyr truncated".into()));
     }
-    let img = image::load_from_memory(&bytes[18..18 + len])?.to_rgba8();
+    let img = coreimage::TiImage::from_bytes(&bytes[18..18 + len])
+        .map_err(|e| TicoError::Image(e.to_string()))?
+        .into_rgba();
     if img.width() != w || img.height() != h {
         return Err(TicoError::Format("tlyr dimension mismatch".into()));
     }
@@ -279,10 +280,10 @@ impl Tico {
                 direction: g.direction,
             },
             Background::Image { path, .. } => {
-                let img = image::open(&path)
-                    .map_err(|e| TicoError::Format(format!("background image: {}", e)))?
-                    .resize_to_fill(CANVAS_SIZE, CANVAS_SIZE, image::imageops::FilterType::Lanczos3)
-                    .to_rgba8();
+                let img = load_rgba(&path)
+                    .map_err(|e| TicoError::Format(format!("background image: {}", e)))?;
+                let img = resize_fill(&img, CANVAS_SIZE, CANVAS_SIZE)
+                    .map_err(|e| TicoError::Format(format!("background image: {}", e)))?;
                 files.push(("layer/background.tlyr".into(), encode_tlyr(&img)?));
                 TicoBackground::Raster { file: "layer/background.tlyr".into() }
             }
@@ -448,7 +449,9 @@ impl TicoIcon {
         if size == CANVAS_SIZE {
             Ok(base)
         } else {
-            Ok(image::imageops::resize(&base, size, size, image::imageops::FilterType::Lanczos3))
+            Ok(coreimage::TiImage::from_rgba(base)
+                .resize(size, size, coreimage::FilterType::Lanczos3)
+                .into_rgba())
         }
     }
 

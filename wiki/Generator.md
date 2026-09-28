@@ -68,7 +68,7 @@ pub fn save(&self, path: impl AsRef<Path>) -> Result<(), Box<dyn std::error::Err
 pub fn render(&self) -> RgbaImage;
 ```
 
-- `save` writes a PNG to disk. Returns `Err` when the image crate fails.
+- `save` writes a PNG to disk. Returns `Err` when CoreImage encoding or file IO fails.
 - `render` returns the raw `RgbaImage` for further programmatic use.
 
 The render order is:
@@ -296,7 +296,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
         ))
         .layer(
-            Layer::new(LayerContent::icon(SFSymbol::HOUSE_FILL))
+            Layer::new(LayerContent::icon(CoreIcon::HOUSE_FILL))
                 .position(212.0, 212.0)
                 .size(600.0, 600.0)
                 .tint(white)
@@ -310,7 +310,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Image Processing Core
 
-All file-based entry points (`add_depth_to_image`, `change_color`,
+All raster IO (file loading, PNG layer coding, Lanczos scaling, saving)
+runs through CoreImage (`coreimage::TiImage`, `codecs::png`); the
+crate-internal `src/img.rs` module holds the load/resize/save helpers.
+`Rgba` / `RgbaImage` are the shared CoreImage buffer types. All file-based
+entry points (`add_depth_to_image`, `change_color`,
 `dark_light_mode`, `set_background_color`) are thin wrappers over one
 pipeline. The pipeline is also available directly:
 
@@ -466,7 +470,7 @@ Parameters:
 
 | Parameter | Description |
 |---|---|
-| `input_path` | Path to the source image (any format supported by the `image` crate) |
+| `input_path` | Path to the source image (PNG, JPEG, GIF, BMP, WebP, ICO via CoreImage) |
 | `corner_radius` | Round the canvas edges; `0` = square, `220` = iOS-style icon |
 | `shadow_offset_x` | Horizontal shadow shift in pixels |
 | `shadow_offset_y` | Vertical shadow shift in pixels |
@@ -505,6 +509,7 @@ Convenience wrapper that calls `add_depth_to_image` and saves the result.
 
 ```rust
 use CoreIcon::generator::IconCanvas;
+use coreimage::{ImageFormat, TiImage};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Convert JPG to PNG and apply depth in one go
@@ -521,7 +526,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(5.0),          // edge_highlight_width
         Some(0.25),         // edge_highlight_opacity
     )?;
-    result.save("my-app-icon-depth.png")?;
+    TiImage::from_rgba(result).save("my-app-icon-depth.png", ImageFormat::Png, 100)?;
     Ok(())
 }
 ```
@@ -611,6 +616,7 @@ Convenience wrapper that calls `change_color` and saves the result.
 ```rust
 use CoreIcon::generator::IconCanvas;
 use CoreIcon::Color;
+use coreimage::{ImageFormat, TiImage};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let orange = Color::from_hex("#FF6B2B").unwrap();
@@ -629,7 +635,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(5.0),          // edge_highlight_width
         Some(0.25),         // edge_highlight_opacity
     )?;
-    result.save("orange-icon.png")?;
+    TiImage::from_rgba(result).save("orange-icon.png", ImageFormat::Png, 100)?;
     Ok(())
 }
 ```
@@ -740,6 +746,7 @@ Convenience wrapper that calls `dark_light_mode` and saves the result.
 
 ```rust
 use CoreIcon::generator::{IconCanvas, IconMode};
+use coreimage::{ImageFormat, TiImage};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let result = IconCanvas::dark_light_mode(
@@ -751,7 +758,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(0.18),
         Some(5.0), Some(0.25),
     )?;
-    result.save("vscode-dark.png")?;
+    TiImage::from_rgba(result).save("vscode-dark.png", ImageFormat::Png, 100)?;
     Ok(())
 }
 ```

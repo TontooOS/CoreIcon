@@ -1,7 +1,8 @@
 use crate::tint::TintMatrix;
 use crate::{Color, Gradient, GradientDirection, SFSymbol};
+use crate::img::{load_rgba, resize_exact, resize_fill, resize_fit, save_rgba};
 use ab_glyph::{FontRef, PxScale, Font};
-use image::{Rgba, RgbaImage};
+use coreimage::{FilterType, Rgba, RgbaImage, TiImage};
 use std::path::{Path, PathBuf};
 
 /// Canvas size (1024x1024).
@@ -317,8 +318,14 @@ impl IconCanvas {
     ///
     /// # Example
     /// ```no_run
-    /// let icon = CoreIcon::generator::IconCanvas::png_to_3d_icon("logo.png")?;
-    /// icon.save("app-icon.png")?;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// use coreicon::generator::IconCanvas;
+    ///
+    /// let icon = IconCanvas::png_to_3d_icon("logo.png")?;
+    /// coreimage::TiImage::from_rgba(icon)
+    ///     .save("app-icon.png", coreimage::ImageFormat::Png, 100)?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn png_to_3d_icon(input_path: impl AsRef<Path>) -> Result<RgbaImage, Box<dyn std::error::Error>> {
         AppIcon::from_file(input_path).process()
@@ -340,7 +347,8 @@ impl IconCanvas {
 ///
 /// # Example
 /// ```no_run
-/// use CoreIcon::{Color, generator::AppIcon};
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// use coreicon::{Color, generator::AppIcon};
 ///
 /// // Default (like API 1):
 /// AppIcon::from_file("vscode.png").save("vscode-app.png")?;
@@ -351,6 +359,8 @@ impl IconCanvas {
 /// // Red artwork on the dark background:
 /// let red = Color::from_hex("#FF3B30").unwrap();
 /// AppIcon::from_file("vscode.png").dark().tint(red).save("vscode-red-dark.png")?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct AppIcon {
@@ -402,10 +412,8 @@ impl AppIcon {
     /// Run the pipeline and return the finished 1024x1024 icon.
     pub fn process(&self) -> Result<RgbaImage, Box<dyn std::error::Error>> {
         let src = match &self.source {
-            AppIconSource::File(path) => image::open(path)?.resize(
-                CANVAS_SIZE, CANVAS_SIZE, image::imageops::FilterType::Lanczos3).to_rgba8(),
-            AppIconSource::Image(img) => image::imageops::resize(
-                img, CANVAS_SIZE, CANVAS_SIZE, image::imageops::FilterType::Lanczos3),
+            AppIconSource::File(path) => resize_fit(&load_rgba(path)?, CANVAS_SIZE, CANVAS_SIZE),
+            AppIconSource::Image(img) => resize_exact(img, CANVAS_SIZE, CANVAS_SIZE),
         };
 
         match self.appearance {
@@ -588,7 +596,7 @@ impl AppIcon {
     /// Process and write a PNG to `path`.
     pub fn save(&self, path: impl AsRef<Path>) -> Result<(), Box<dyn std::error::Error>> {
         let img = self.process()?;
-        img.save(path.as_ref())?;
+        save_rgba(&img, path.as_ref())?;
         Ok(())
     }
 }
@@ -735,13 +743,14 @@ impl Layer {
 ///
 /// # Example
 /// ```no_run
-/// use CoreIcon::prelude::*;
-/// use CoreIcon::generator::*;
+/// use coreicon::prelude::*;
+/// use coreicon::generator::*;
+/// use coreicon::HOUSE;
 ///
 /// let icon = IconCanvas::new()
 ///     .background(Background::color(Color::from_hex("#1d1d1d").unwrap()))
 ///     .layer(
-///         Layer::new(LayerContent::icon(SFSymbol::HOUSE))
+///         Layer::new(LayerContent::icon(HOUSE))
 ///             .position(312.0, 312.0)
 ///             .size(400.0, 400.0)
 ///             .tint(Color::WHITE)
@@ -889,7 +898,7 @@ impl IconCanvas {
     /// Generate the icon and save as PNG.
     pub fn save(&self, path: impl AsRef<Path>) -> Result<(), Box<dyn std::error::Error>> {
         let img = self.render();
-        img.save(path.as_ref())?;
+        save_rgba(&img, path.as_ref())?;
         Ok(())
     }
 
@@ -929,9 +938,9 @@ impl IconCanvas {
         input_path: impl AsRef<Path>,
         options: &ProcessOptions,
     ) -> Result<RgbaImage, Box<dyn std::error::Error>> {
-        let src = image::open(input_path)?;
-        let src = src.resize(CANVAS_SIZE, CANVAS_SIZE, image::imageops::FilterType::Lanczos3);
-        Ok(Self::process_image(&src.to_rgba8(), options))
+        let src = load_rgba(input_path)?;
+        let src = resize_fit(&src, CANVAS_SIZE, CANVAS_SIZE);
+        Ok(Self::process_image(&src, options))
     }
 
     /// Apply recoloring, background replacement and depth effects to an
@@ -1917,7 +1926,8 @@ impl IconCanvas {
     ///
     /// # Example
     /// ```no_run
-    /// use CoreIcon::generator::IconCanvas;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// use coreicon::generator::IconCanvas;
     ///
     /// let result = IconCanvas::add_depth_to_image(
     ///     "my-icon.png",
@@ -1931,8 +1941,11 @@ impl IconCanvas {
     ///     Some(0.15),  // specular_opacity
     ///     Some(4.0),   // edge_highlight_width
     ///     Some(0.2),   // edge_highlight_opacity
-    /// );
-    /// result.unwrap().save("output.png").unwrap();
+    /// )?;
+    /// coreimage::TiImage::from_rgba(result)
+    ///     .save("output.png", coreimage::ImageFormat::Png, 100)?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn add_depth_to_image(
         input_path: impl AsRef<Path>,
@@ -1983,7 +1996,7 @@ impl IconCanvas {
             specular_opacity,
             edge_highlight_width, edge_highlight_opacity,
         )?;
-        img.save(output_path.as_ref())?;
+        save_rgba(&img, output_path.as_ref())?;
         Ok(())
     }
 
@@ -2000,8 +2013,9 @@ impl IconCanvas {
     ///
     /// # Example
     /// ```no_run
-    /// use CoreIcon::generator::IconCanvas;
-    /// use CoreIcon::Color;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// use coreicon::generator::IconCanvas;
+    /// use coreicon::Color;
     ///
     /// let result = IconCanvas::change_color(
     ///     "my-icon.png",
@@ -2012,8 +2026,11 @@ impl IconCanvas {
     ///     Some(10.0),  Some(0.25),
     ///     Some(0.15),
     ///     Some(4.0),   Some(0.2),
-    /// );
-    /// result.unwrap().save("orange-icon.png").unwrap();
+    /// )?;
+    /// coreimage::TiImage::from_rgba(result)
+    ///     .save("orange-icon.png", coreimage::ImageFormat::Png, 100)?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn change_color(
         input_path: impl AsRef<Path>,
@@ -2068,7 +2085,7 @@ impl IconCanvas {
             specular_opacity,
             edge_highlight_width, edge_highlight_opacity,
         )?;
-        img.save(output_path.as_ref())?;
+        save_rgba(&img, output_path.as_ref())?;
         Ok(())
     }
 
@@ -2138,7 +2155,7 @@ impl IconCanvas {
             specular_opacity,
             edge_highlight_width, edge_highlight_opacity,
         )?;
-        img.save(output_path.as_ref())?;
+        save_rgba(&img, output_path.as_ref())?;
         Ok(())
     }
 
@@ -2199,15 +2216,16 @@ impl IconCanvas {
                 Self::draw_gradient_rect(img, 0.0, 0.0, CANVAS_SIZE as f32, CANVAS_SIZE as f32, gradient, 1.0);
             }
             Background::Image { path, tint } => {
-                if let Ok(bg_img) = image::open(path) {
-                    let bg = bg_img.resize_to_fill(CANVAS_SIZE, CANVAS_SIZE, image::imageops::FilterType::Lanczos3);
-                    for (x, y, pixel) in bg.to_rgba8().enumerate_pixels() {
-                        if x < CANVAS_SIZE && y < CANVAS_SIZE {
-                            let mut p = *pixel;
-                            if let Some(t) = tint {
-                                p = Self::tint_pixel(p, *t);
+                if let Ok(bg_img) = load_rgba(path) {
+                    if let Ok(bg) = resize_fill(&bg_img, CANVAS_SIZE, CANVAS_SIZE) {
+                        for (x, y, pixel) in bg.enumerate_pixels() {
+                            if x < CANVAS_SIZE && y < CANVAS_SIZE {
+                                let mut p = *pixel;
+                                if let Some(t) = tint {
+                                    p = Self::tint_pixel(p, *t);
+                                }
+                                img.put_pixel(x, y, p);
                             }
-                            img.put_pixel(x, y, p);
                         }
                     }
                 }
@@ -2386,21 +2404,22 @@ impl IconCanvas {
     /// positioned sprite ready for compositing.
     fn icon_sprite(&self, layer: &Layer, symbol: &SFSymbol) -> Option<(RgbaImage, u32, u32)> {
         let full = icon_file(symbol);
-        let icon_img = image::open(&full).ok()?;
+        let icon_img = TiImage::load(&full.to_string_lossy()).ok()?;
         let p = self.padding;
         let box_w = (layer.width - p * 2.0).max(1.0);
         let box_h = (layer.height - p * 2.0).max(1.0);
-        let iw = icon_img.width() as f32;
-        let ih = icon_img.height() as f32;
+        let (iw, ih) = icon_img.dimensions();
+        let (iw, ih) = (iw as f32, ih as f32);
         let scale = (box_w / iw).min(box_h / ih);
         let resized = icon_img.resize(
             ((iw * scale).round() as u32).max(1),
             ((ih * scale).round() as u32).max(1),
-            image::imageops::FilterType::Lanczos3,
+            FilterType::Lanczos3,
         );
-        let x = (layer.x + p + (box_w - resized.width() as f32) / 2.0).round().max(0.0) as u32;
-        let y = (layer.y + p + (box_h - resized.height() as f32) / 2.0).round().max(0.0) as u32;
-        Some((resized.to_rgba8(), x, y))
+        let (rw, rh) = resized.dimensions();
+        let x = (layer.x + p + (box_w - rw as f32) / 2.0).round().max(0.0) as u32;
+        let y = (layer.y + p + (box_h - rh as f32) / 2.0).round().max(0.0) as u32;
+        Some((resized.into_rgba(), x, y))
     }
 
     fn draw_icon(&self, img: &mut RgbaImage, layer: &Layer, symbol: &SFSymbol) {
@@ -2438,21 +2457,24 @@ impl IconCanvas {
     }
 
     fn draw_image_element(&self, img: &mut RgbaImage, layer: &Layer, path: &str) {
-        if let Ok(element_img) = image::open(path) {
-            let resized = element_img.resize_to_fill(layer.width as u32, layer.height as u32, image::imageops::FilterType::Lanczos3);
-            for (px, py, pixel) in resized.to_rgba8().enumerate_pixels() {
-                let dx = layer.x as u32 + px;
-                let dy = layer.y as u32 + py;
-                if dx < CANVAS_SIZE && dy < CANVAS_SIZE {
-                    let mut p = *pixel;
-                    if let Some(tint) = &layer.fill {
-                        p = if layer.shaded { Self::tint_pixel_shaded(p, *tint) } else { Self::tint_pixel(p, *tint) };
+        if let Ok(element_img) = load_rgba(path) {
+            if let Ok(resized) =
+                resize_fill(&element_img, layer.width as u32, layer.height as u32)
+            {
+                for (px, py, pixel) in resized.enumerate_pixels() {
+                    let dx = layer.x as u32 + px;
+                    let dy = layer.y as u32 + py;
+                    if dx < CANVAS_SIZE && dy < CANVAS_SIZE {
+                        let mut p = *pixel;
+                        if let Some(tint) = &layer.fill {
+                            p = if layer.shaded { Self::tint_pixel_shaded(p, *tint) } else { Self::tint_pixel(p, *tint) };
+                        }
+                        if let Some(m) = &layer.tint_matrix {
+                            p = Self::apply_matrix_to_pixel(m, p);
+                        }
+                        p[3] = (p[3] as f32 * layer.opacity).round().clamp(0.0, 255.0) as u8;
+                        Self::blend_pixel(img, dx, dy, p);
                     }
-                    if let Some(m) = &layer.tint_matrix {
-                        p = Self::apply_matrix_to_pixel(m, p);
-                    }
-                    p[3] = (p[3] as f32 * layer.opacity).round().clamp(0.0, 255.0) as u8;
-                    Self::blend_pixel(img, dx, dy, p);
                 }
             }
         }

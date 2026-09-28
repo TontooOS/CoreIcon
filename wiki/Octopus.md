@@ -92,9 +92,9 @@ impl OctopusIcon {
 | `no_tint` | Remove previously set tint |
 | `load` | Load original `RgbaImage` without recoloring |
 | `load_tinted` | Load and tint via `RecolorMode::Shaded` when a tint is set, otherwise original |
-| `save` | `load_tinted` then `image::save` to `out` |
+| `save` | `load_tinted` then CoreImage save to `out` (format from extension) |
 
-Returns `Err` when `image::open` fails (file not found or invalid format).
+Returns `Err` when CoreImage loading fails (file not found or invalid format).
 
 ## Free functions
 
@@ -148,6 +148,7 @@ pub fn available_on_disk() -> Vec<String>
 
 ```rust
 use coreicon::{Color, octopus::{OctopusVariant, OctopusIcon, use_octopus}};
+use coreimage::{ImageFormat, TiImage};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Builder style
@@ -159,11 +160,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Free function: file name + color
     let orange = Color::from_hex("#FF6B2B").unwrap();
     let img = use_octopus("tontoo_purple.png", orange)?;
-    img.save("octopus-orange.png")?;
+    TiImage::from_rgba(img).save("octopus-orange.png", ImageFormat::Png, 100)?;
 
     // Without extension, case-insensitive, turkis alias
     let img2 = use_octopus("tuerkis", Color::CYAN)?;
-    img2.save("octopus-cyan.png")?;
+    TiImage::from_rgba(img2).save("octopus-cyan.png", ImageFormat::Png, 100)?;
 
     Ok(())
 }

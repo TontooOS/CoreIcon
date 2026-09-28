@@ -59,17 +59,20 @@ generator's `ASSETS_DIR` at the actual assets folder at runtime before
 rendering, otherwise icon layers are silently skipped.
 
 ```rust
-use CoreIcon::SFSymbol;
+use CoreIcon::{SFSymbol, HOUSE, HOUSE_FILL};
 
-let house = SFSymbol::HOUSE;
+let house = HOUSE;
 assert_eq!(house.name(), "house");
 
 let found = SFSymbol::from_name("house.fill").unwrap();
-assert_eq!(found, SFSymbol::HOUSE_FILL);
+assert_eq!(found, HOUSE_FILL);
 
 let total = SFSymbol::count();
 let all   = SFSymbol::all();
 ```
+
+Symbol constants live at the crate root (`CoreIcon::HOUSE_FILL`); the
+`SFSymbol::` prefix in the table below is shorthand for the symbol type.
 
 ## Cross References
 

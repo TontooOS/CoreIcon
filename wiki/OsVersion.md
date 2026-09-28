@@ -66,7 +66,7 @@ impl OsVersionIcon {
 |---|---|
 | `new` | Create for `version` folder + file `name` |
 | `path` | Runtime-relative path via `os_version_path` |
-| `load` | Decode with `image::open` to `RgbaImage`; works for PNG and JPG |
+| `load` | Decode with CoreImage to `RgbaImage`; works for PNG and JPG |
 | `save` | `load` then save to `out` |
 
 Returns `Err` when the file cannot be opened or decoded.
@@ -118,11 +118,12 @@ assets/TontooOS/
 
 ```rust
 use coreicon::os_version::{use_osversionicons, OsVersionIcon, available_versions, available_icons};
+use coreimage::{ImageFormat, TiImage};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Free function
     let icon = use_osversionicons("26.1.0", "TontooOS_Icon.png")?;
-    icon.save("tontoos-26-icon.png")?;
+    TiImage::from_rgba(icon).save("tontoos-26-icon.png", ImageFormat::Png, 100)?;
 
     // Case-insensitive fallback still works
     let seal = use_osversionicons("26.1.0", "SEAL.PNG")?;
@@ -139,7 +140,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-The function supports any `image` crate format (PNG, JPG, etc.). No tinting is applied; for icon processing (recolor, depth, 3D) pipe the result through `CoreIcon::generator::IconCanvas::process_image` or `AppIcon`.
+The function supports any CoreImage format (PNG, JPG, etc.). No tinting is applied; for icon processing (recolor, depth, 3D) pipe the result through `CoreIcon::generator::IconCanvas::process_image` or `AppIcon`.
 
 ## Cross References
 

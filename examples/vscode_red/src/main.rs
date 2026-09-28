@@ -1,5 +1,6 @@
 use CoreIcon::generator::*;
 use CoreIcon::Color;
+use coreimage::{ImageFormat, TiImage};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Generating VS Code icon variants...");
@@ -23,7 +24,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "../vscode_converted.png",
         &ProcessOptions { recolor: Some(recolor_light), background_replace: None, depth: depth(), ..Default::default() },
     )?;
-    light.save("vscode_red.png")?;
+    TiImage::from_rgba(light).save("vscode_red.png", ImageFormat::Png, 100)?;
     println!("Saved: vscode_red.png");
 
     // ── Dark gray background ──
@@ -44,7 +45,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ..Default::default()
         },
     )?;
-    dark.save("vscode_red_dark.png")?;
+    TiImage::from_rgba(dark).save("vscode_red_dark.png", ImageFormat::Png, 100)?;
     println!("Saved: vscode_red_dark.png");
 
     // ── Light gray background ──
@@ -63,7 +64,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ..Default::default()
         },
     )?;
-    gray.save("vscode_red_lightgray.png")?;
+    TiImage::from_rgba(gray).save("vscode_red_lightgray.png", ImageFormat::Png, 100)?;
     println!("Saved: vscode_red_lightgray.png");
 
     Ok(())

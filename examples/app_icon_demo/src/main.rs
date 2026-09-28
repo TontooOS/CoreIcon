@@ -1,11 +1,13 @@
 use CoreIcon::generator::*;
 use CoreIcon::Color;
+use coreimage::{ImageFormat, TiImage};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let src = "../vscode_converted.png";
 
     // ── API 1: PNG -> 3D App Icon (1024x1024, same colors, glass finish) ──
-    IconCanvas::png_to_3d_icon(src)?.save("api_1_3d.png")?;
+    TiImage::from_rgba(IconCanvas::png_to_3d_icon(src)?)
+        .save("api_1_3d.png", ImageFormat::Png, 100)?;
     println!("Saved: api_1_3d.png");
 
     // ── API 2: default == API 1 ──

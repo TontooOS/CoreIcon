@@ -1,6 +1,7 @@
 use CoreIcon::generator::IconCanvas;
 use CoreIcon::generator::IconMode;
 use CoreIcon::Color;
+use coreimage::{ImageFormat, TiImage};
 
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -12,8 +13,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 1. Convert JPG to PNG
     println!("Converting {} to PNG...", input);
-    let img = image::open(input)?;
-    img.save(png_output)?;
+    let img = TiImage::load(input)?;
+    img.save(png_output, ImageFormat::Png, 100)?;
     println!("Saved: {} ({}x{})", png_output, img.width(), img.height());
 
     // 2. Apply depth effects
@@ -31,7 +32,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(4.0),         // edge_highlight_width
         Some(0.2),         // edge_highlight_opacity
     )?;
-    result.save(depth_output)?;
+    TiImage::from_rgba(result).save(depth_output, ImageFormat::Png, 100)?;
     println!("Saved: {}", depth_output);
 
     // 3. Change color to orange (TontooOS accent) with depth
@@ -52,7 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(4.0),         // edge_highlight_width
         Some(0.2),         // edge_highlight_opacity
     )?;
-    result.save(orange_output)?;
+    TiImage::from_rgba(result).save(orange_output, ImageFormat::Png, 100)?;
     println!("Saved: {}", orange_output);
 
     // 4. Dark mode: background -> black, logo stays white
@@ -71,7 +72,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(4.0),         // edge_highlight_width
         Some(0.2),         // edge_highlight_opacity
     )?;
-    result.save(dark_output)?;
+    TiImage::from_rgba(result).save(dark_output, ImageFormat::Png, 100)?;
     println!("Saved: {}", dark_output);
 
     println!("\nDone! Check the output files.");

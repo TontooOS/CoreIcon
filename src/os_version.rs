@@ -4,7 +4,8 @@
 //! and a file name (e.g. `"TontooOS_Icon.png"`, `"seal.png"`, `"ocean.jpg"`)
 //! and get the decoded `RgbaImage` back.
 
-use image::RgbaImage;
+use crate::img::{load_rgba, save_rgba};
+use coreimage::RgbaImage;
 use std::path::{Path, PathBuf};
 
 /// Base directory for versioned assets.
@@ -109,7 +110,7 @@ impl OsVersionIcon {
     pub fn name(&self) -> &str { &self.name }
     pub fn path(&self) -> String { os_version_path(&self.version, &self.name) }
 
-    /// Load the image (supports PNG, JPG, etc. via `image::open`).
+    /// Load the image (supports PNG, JPG, etc. via CoreImage).
     pub fn load(&self) -> Result<RgbaImage, Box<dyn std::error::Error>> {
         // Resolve again at load time so a sidecar staged after path()
         // was called is still found.
@@ -119,12 +120,12 @@ impl OsVersionIcon {
         } else {
             self.path()
         };
-        Ok(image::open(&p)?.to_rgba8())
+        Ok(load_rgba(&p)?)
     }
 
     pub fn save(&self, out: impl AsRef<Path>) -> Result<(), Box<dyn std::error::Error>> {
         let img = self.load()?;
-        img.save(out.as_ref())?;
+        save_rgba(&img, out.as_ref())?;
         Ok(())
     }
 }
@@ -144,7 +145,7 @@ impl OsVersionIcon {
 pub fn use_osversionicons(version: &str, name: &str) -> Result<RgbaImage, Box<dyn std::error::Error>> {
     let p = os_version_path(version, name);
     if Path::new(&p).exists() {
-        return Ok(image::open(&p)?.to_rgba8());
+        return Ok(load_rgba(&p)?);
     }
     // case-insensitive fallback: scan directory for case-insensitive match
     let dir = resolve_os_version_base().join(version);
@@ -154,7 +155,7 @@ pub fn use_osversionicons(version: &str, name: &str) -> Result<RgbaImage, Box<dy
             if let Some(n) = e.file_name().to_str() {
                 if n.to_ascii_lowercase() == target {
                     let found = dir.join(n);
-                    return Ok(image::open(&found)?.to_rgba8());
+                    return Ok(load_rgba(&found)?);
                 }
             }
         }
@@ -174,6 +175,6 @@ pub fn use_osversionicons_and_save(
     output: impl AsRef<Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let img = use_osversionicons(version, name)?;
-    img.save(output.as_ref())?;
+    save_rgba(&img, output.as_ref())?;
     Ok(())
 }

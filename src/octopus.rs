@@ -5,8 +5,9 @@
 //! `Color`, get a tinted `RgbaImage` back.
 
 use crate::generator::{RecolorMode, RecolorOptions};
+use crate::img::{load_rgba, save_rgba};
 use crate::{Color, generator::IconCanvas};
-use image::RgbaImage;
+use coreimage::RgbaImage;
 use std::path::{Path, PathBuf};
 
 /// Base directory for the TontooOS branding assets (relative to crate root / runtime CWD).
@@ -180,7 +181,7 @@ impl OctopusIcon {
     /// Load the original image without any recoloring.
     pub fn load(&self) -> Result<RgbaImage, Box<dyn std::error::Error>> {
         let path = self.path();
-        Ok(image::open(&path)?.to_rgba8())
+        Ok(load_rgba(&path)?)
     }
 
     /// Load and tint with the configured color. If no tint is set, the
@@ -195,7 +196,7 @@ impl OctopusIcon {
     /// Save the (optionally tinted) image to `out`.
     pub fn save(&self, out: impl AsRef<Path>) -> Result<(), Box<dyn std::error::Error>> {
         let img = self.load_tinted()?;
-        img.save(out.as_ref())?;
+        save_rgba(&img, out.as_ref())?;
         Ok(())
     }
 }
@@ -230,7 +231,7 @@ pub fn use_octopus_variant(variant: OctopusVariant, color: Color) -> Result<Rgba
 pub fn use_octopus_original(file: &str) -> Result<RgbaImage, Box<dyn std::error::Error>> {
     let variant = OctopusVariant::from_name(file)
         .ok_or_else(|| format!("unknown octopus variant '{}'", file))?;
-    Ok(image::open(variant.path())?.to_rgba8())
+    Ok(load_rgba(variant.path())?)
 }
 
 /// Convenience: load, tint and save to `output`.
@@ -240,7 +241,7 @@ pub fn use_octopus_and_save(
     output: impl AsRef<Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let img = use_octopus(file, color)?;
-    img.save(output.as_ref())?;
+    save_rgba(&img, output.as_ref())?;
     Ok(())
 }
 
@@ -254,7 +255,7 @@ fn available_variants_hint() -> String {
 }
 
 fn load_tinted_path(path: &str, color: Color) -> Result<RgbaImage, Box<dyn std::error::Error>> {
-    let img = image::open(path)?.to_rgba8();
+    let img = load_rgba(path)?;
     // Shaded mode: full luminance-graded replacement. Preserves outlines.
     let opts = RecolorOptions::new(color, 1.0).mode(RecolorMode::Shaded);
     Ok(IconCanvas::recolor_image(&img, &opts))

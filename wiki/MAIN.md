@@ -41,6 +41,7 @@ Point the generator at the SF Symbol assets, then render an icon:
 ```rust
 use CoreIcon::prelude::*;
 use CoreIcon::generator::*;
+use CoreIcon::HOUSE;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     unsafe { CoreIcon::generator::ASSETS_DIR = "assets/icons"; }
@@ -48,7 +49,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let icon = IconCanvas::new()
         .background(Background::color(Color::from_hex("#1d1d1d").unwrap()))
         .layer(
-            Layer::new(LayerContent::icon(SFSymbol::HOUSE))
+            Layer::new(LayerContent::icon(HOUSE))
                 .position(312.0, 312.0)
                 .size(400.0, 400.0)
                 .tint(Color::WHITE)
@@ -65,6 +66,17 @@ See [Generator.md](Generator.md), [Color.md](Color.md) and
 
 ## Changelog
 
+- 2026-09-28: Raster backend moved from the third-party `image` crate to CoreImage:
+  file loading (`TiImage::load`), PNG layer coding (`codecs::png`), Lanczos scaling
+  (`resize` / aspect-fit / fill-crop) and saving (`TiImage::save`, format from file
+  extension) in `generator`, `tico`, `tint`, `octopus` and `os_version` go through a
+  new crate-internal `src/img.rs` helper module. The `image` dependency is removed;
+  `Rgba` / `RgbaImage` now come from `coreimage` (same buffer type, zero-copy via
+  `TiImage::from_rgba` / `into_rgba`). Callers save raw buffers with
+  `coreimage::TiImage::from_rgba(buf).save(path, format, quality)`. Fixed doctests
+  (`coreicon::` paths, `Result` mains) and the `SFSymbol::HOUSE` examples (symbol
+  constants live at the crate root, e.g. `coreicon::HOUSE_FILL`).
+  See [Generator.md](Generator.md), [Tico.md](Tico.md), [Octopus.md](Octopus.md).
 - 2026-09-25: New `Layer.shaded` flag (default `false`) with `.shaded(b)`
   builder: `shaded: true` tints `Icon`/`Image` layers with the source
   brightness as mask (white maps to the full tint, darker pixels shade toward

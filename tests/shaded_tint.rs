@@ -1,6 +1,6 @@
 use coreicon::generator::*;
 use coreicon::Color;
-use image::{Rgba, RgbaImage};
+use coreimage::{ImageFormat, Rgba, RgbaImage, TiImage};
 
 fn make_gradient_png(path: &std::path::Path) {
     // 64x64: top half white, bottom half mid-gray (128).
@@ -11,7 +11,9 @@ fn make_gradient_png(path: &std::path::Path) {
             img.put_pixel(x, y, Rgba([v, v, v, 255]));
         }
     }
-    img.save(path).unwrap();
+    TiImage::from_rgba(img)
+        .save(&path.to_string_lossy(), ImageFormat::Png, 100)
+        .unwrap();
 }
 
 #[test]

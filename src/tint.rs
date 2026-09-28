@@ -4,7 +4,7 @@
 // plus per-row offsets). One matrix replaces recolored asset variants.
 
 use crate::Color;
-use image::{Rgba, RgbaImage};
+use coreimage::{Rgba, RgbaImage};
 
 /// A 4x5 color transformation matrix.
 ///

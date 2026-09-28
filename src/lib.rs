@@ -165,6 +165,9 @@ pub mod prelude { pub use crate::{SFSymbol, SFSymbolView, Color, Gradient, Gradi
 // Icon generator
 pub mod generator;
 
+// Raster I/O helpers on top of CoreImage (crate-internal).
+pub(crate) mod img;
+
 // TICO icon container (ZIP-based `.tico` files with compact layer storage)
 pub mod tico;
 

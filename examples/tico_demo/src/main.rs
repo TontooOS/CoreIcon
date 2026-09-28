@@ -1,6 +1,7 @@
 use CoreIcon::generator::*;
 use CoreIcon::tico::Tico;
 use CoreIcon::{Color, Gradient, GradientDirection};
+use coreimage::{ImageFormat, TiImage};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Builder icon: dark background, white circle + shaded rect.
@@ -25,14 +26,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let t = Tico::load("demo.tico")?;
     println!("layers: {}", t.layer_count());
-    t.render_default()?.save("tico_default.png")?;
+    TiImage::from_rgba(t.render_default()?).save("tico_default.png", ImageFormat::Png, 100)?;
     println!("saved tico_default.png");
     let red = Color::from_hex("#FF3B30").unwrap();
-    t.render(1024, Some(red))?.save("tico_red.png")?;
+    TiImage::from_rgba(t.render(1024, Some(red))?).save("tico_red.png", ImageFormat::Png, 100)?;
     println!("saved tico_red.png");
-    t.render(1024, Some(Color::ACCENT))?.save("tico_blue.png")?;
+    TiImage::from_rgba(t.render(1024, Some(Color::ACCENT))?).save("tico_blue.png", ImageFormat::Png, 100)?;
     println!("saved tico_blue.png");
-    t.render(256, Some(Color::ACCENT))?.save("tico_blue_256.png")?;
+    TiImage::from_rgba(t.render(256, Some(Color::ACCENT))?).save("tico_blue_256.png", ImageFormat::Png, 100)?;
     println!("saved tico_blue_256.png");
     Ok(())
 }

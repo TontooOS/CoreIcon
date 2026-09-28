@@ -100,11 +100,12 @@ background is missing.
 
 ```rust
 use CoreIcon::Color;
+use coreimage::{ImageFormat, TiImage};
 
 let red = Color::from_hex("#FF3B30").unwrap();
 let big = icon.render(1024, Some(red))?;
 let small = icon.render(256, Some(red))?;
-big.save("icon-red-1024.png")?;
+TiImage::from_rgba(big).save("icon-red-1024.png", ImageFormat::Png, 100)?;
 ```
 
 A runnable version lives in `examples/tico_demo` (`demo.tico`, 6.5KB for
@@ -116,6 +117,7 @@ two layers, rendered in default/red/blue).
 use CoreIcon::generator::*;
 use CoreIcon::tico::Tico;
 use CoreIcon::Color;
+use coreimage::{ImageFormat, TiImage};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let icon = IconCanvas::new()
@@ -132,8 +134,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load and render a red 1024px icon plus a blue 256px one.
     let tico = Tico::load("demo.tico")?;
     let red = Color::from_hex("#FF3B30").unwrap();
-    tico.render(1024, Some(red))?.save("tico-red.png")?;
-    tico.render(256, Some(Color::ACCENT))?.save("tico-blue-256.png")?;
+    TiImage::from_rgba(tico.render(1024, Some(red))?).save("tico-red.png", ImageFormat::Png, 100)?;
+    TiImage::from_rgba(tico.render(256, Some(Color::ACCENT))?).save("tico-blue-256.png", ImageFormat::Png, 100)?;
     Ok(())
 }
 ```

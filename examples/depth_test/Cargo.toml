@@ -5,4 +5,4 @@ edition = "2021"
 
 [dependencies]
 CoreIcon = { path = "../..", package = "coreicon" }
-image = "0.25"
+coreimage = { package = "coreimage", path = "../../../CoreImage" }
