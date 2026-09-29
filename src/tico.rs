@@ -1,9 +1,12 @@
 // TICO - TontooOS icon container.
 //
-// A `.tico` file is a plain ZIP archive that is only ever named `*.tico`
-// (never `*.tico.zip`). It contains no preview image and no `.png` files:
+// A `.tico` file is a TICO container as defined by ArchiveKit
+// (`ArchiveKit/src/tico.rs`): the same indexed single-file engine as `.app`
+// (TAPP) containers with its own `TICO`/`TICF` magic, a central directory
+// and a CRC-checked footer. It is only ever named `*.tico` (never
+// `*.tico.zip`). It contains no preview image and no `.png` files:
 //
-//   manifest.json      metadata, background, layer table
+//   manifest.fico      metadata, background, layer table (Fish Config syntax)
 //   layer/00.tlyr      one custom layer file per entry
 //   layer/01.tlyr      ...
 //
@@ -15,13 +18,15 @@
 // Rendering (`TicoIcon::render`) composites the layers at 1024px, applies an
 // optional tint color (luminance-graded, overlaps stay darker) and the Apple
 // app-icon finish, then scales to the requested size.
+//
+// Listing names or reading one layer only touches the footer plus the
+// central directory (or the single entry), so icons open in milliseconds
+// without scanning the whole file.
 
 use crate::generator::{Background, IconCanvas, LayerContent, CANVAS_SIZE};
 use crate::img::{load_rgba, resize_fill};
 use crate::{Color, GradientDirection};
 use coreimage::{Rgba, RgbaImage};
-use serde::{Deserialize, Serialize};
-use std::io::{Read, Write};
 use std::path::Path;
 
 /// TICO manifest version.
@@ -37,8 +42,7 @@ pub const TLYR_VERSION: u8 = 1;
 #[derive(Debug)]
 pub enum TicoError {
     Io(std::io::Error),
-    Zip(String),
-    Json(String),
+    Container(String),
     Image(String),
     Format(String),
 }
@@ -47,8 +51,7 @@ impl std::fmt::Display for TicoError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Io(e) => write!(f, "tico io: {}", e),
-            Self::Zip(e) => write!(f, "tico zip: {}", e),
-            Self::Json(e) => write!(f, "tico manifest: {}", e),
+            Self::Container(e) => write!(f, "tico container: {}", e),
             Self::Image(e) => write!(f, "tico image: {}", e),
             Self::Format(e) => write!(f, "tico format: {}", e),
         }
@@ -60,20 +63,17 @@ impl std::error::Error for TicoError {}
 impl From<std::io::Error> for TicoError {
     fn from(e: std::io::Error) -> Self { Self::Io(e) }
 }
-impl From<serde_json::Error> for TicoError {
-    fn from(e: serde_json::Error) -> Self { Self::Json(e.to_string()) }
-}
 impl From<coreimage::ImageError> for TicoError {
     fn from(e: coreimage::ImageError) -> Self { Self::Image(e.to_string()) }
 }
-impl From<zip::result::ZipError> for TicoError {
-    fn from(e: zip::result::ZipError) -> Self { Self::Zip(e.to_string()) }
+impl From<archivekit::ArchiveError> for TicoError {
+    fn from(e: archivekit::ArchiveError) -> Self { Self::Container(e.to_string()) }
 }
 
 // ── Manifest ────────────────────────────────────────────────────────
 
-/// Background stored in `manifest.json` (no raster needed for flat icons).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Background of a `.tico` icon (no raster needed for flat icons).
+#[derive(Debug, Clone)]
 pub enum TicoBackground {
     Color { color: String },
     Gradient { colors: Vec<String>, positions: Vec<f32>, direction: GradientDirection },
@@ -81,7 +81,7 @@ pub enum TicoBackground {
 }
 
 /// One entry of the manifest layer table.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TicoLayerMeta {
     pub file: String,
     pub opacity: f32,
@@ -89,14 +89,30 @@ pub struct TicoLayerMeta {
     pub default_color: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Manifest {
-    format: String,
-    version: u32,
-    name: String,
-    canvas: u32,
-    background: TicoBackground,
-    layers: Vec<TicoLayerMeta>,
+fn direction_to_string(dir: GradientDirection) -> String {
+    match dir {
+        GradientDirection::TopToBottom => "TopToBottom",
+        GradientDirection::BottomToTop => "BottomToTop",
+        GradientDirection::LeftToRight => "LeftToRight",
+        GradientDirection::RightToLeft => "RightToLeft",
+        GradientDirection::TopLeadingToBottomTrailing => "TopLeadingToBottomTrailing",
+        GradientDirection::TopTrailingToBottomLeading => "TopTrailingToBottomLeading",
+        GradientDirection::CenterRadial => "CenterRadial",
+    }
+    .to_string()
+}
+
+fn direction_from_string(s: &str) -> Result<GradientDirection, TicoError> {
+    match s {
+        "TopToBottom" => Ok(GradientDirection::TopToBottom),
+        "BottomToTop" => Ok(GradientDirection::BottomToTop),
+        "LeftToRight" => Ok(GradientDirection::LeftToRight),
+        "RightToLeft" => Ok(GradientDirection::RightToLeft),
+        "TopLeadingToBottomTrailing" => Ok(GradientDirection::TopLeadingToBottomTrailing),
+        "TopTrailingToBottomLeading" => Ok(GradientDirection::TopTrailingToBottomLeading),
+        "CenterRadial" => Ok(GradientDirection::CenterRadial),
+        _ => Err(TicoError::Format(format!("unknown gradient direction '{s}'"))),
+    }
 }
 
 // ── TLYR layer files ────────────────────────────────────────────────
@@ -261,7 +277,7 @@ fn sample_tico_gradient(colors: &[Color], positions: &[f32], dir: GradientDirect
 
 // ── Export ──────────────────────────────────────────────────────────
 
-/// Write an [`IconCanvas`] as `*.tico` (ZIP container, no PNG files inside).
+/// Write an [`IconCanvas`] as `*.tico` (TICO container, no PNG files inside).
 ///
 /// Every layer is rasterized at full 1024px into one `layer/NN.tlyr` file.
 /// Flat builder artwork compresses to a few KB per layer (1-100KB total).
@@ -269,15 +285,18 @@ fn sample_tico_gradient(colors: &[Color], positions: &[f32], dir: GradientDirect
 pub struct Tico;
 
 impl Tico {
-    pub fn export(canvas: &IconCanvas, name: &str, path: impl AsRef<Path>) -> Result<(), TicoError> {
+    fn build_manifest(
+        canvas: &IconCanvas,
+        name: &str,
+    ) -> Result<(archivekit::TicoManifest, Vec<(String, Vec<u8>)>), TicoError> {
         let mut files: Vec<(String, Vec<u8>)> = Vec::new();
 
         let bg = match canvas.tico_background() {
-            Background::Color(c) => TicoBackground::Color { color: color_to_hex(c) },
-            Background::Gradient(g) => TicoBackground::Gradient {
+            Background::Color(c) => archivekit::TicoBackground::Color { color: color_to_hex(c) },
+            Background::Gradient(g) => archivekit::TicoBackground::Gradient {
                 colors: g.stops.iter().map(|s| color_to_hex(s.color)).collect(),
                 positions: g.stops.iter().map(|s| s.position).collect(),
-                direction: g.direction,
+                direction: direction_to_string(g.direction),
             },
             Background::Image { path, .. } => {
                 let img = load_rgba(&path)
@@ -285,11 +304,11 @@ impl Tico {
                 let img = resize_fill(&img, CANVAS_SIZE, CANVAS_SIZE)
                     .map_err(|e| TicoError::Format(format!("background image: {}", e)))?;
                 files.push(("layer/background.tlyr".into(), encode_tlyr(&img)?));
-                TicoBackground::Raster { file: "layer/background.tlyr".into() }
+                archivekit::TicoBackground::Raster { file: "layer/background.tlyr".into() }
             }
         };
 
-        let mut layers_meta = Vec::new();
+        let mut layers = Vec::new();
         for i in 0..canvas.tico_layer_count() {
             let layer = canvas
                 .tico_layer(i)
@@ -297,9 +316,9 @@ impl Tico {
             let raster = canvas
                 .tico_rasterize_layer(i)
                 .ok_or_else(|| TicoError::Format(format!("cannot rasterize layer {}", i)))?;
-            let file = format!("layer/{:02}.tlyr", layers_meta.len());
+            let file = format!("layer/{:02}.tlyr", layers.len());
             files.push((file.clone(), encode_tlyr(&raster)?));
-            layers_meta.push(TicoLayerMeta {
+            layers.push(archivekit::TicoLayerMeta {
                 file,
                 opacity: layer.opacity,
                 recolorable: !matches!(layer.content, LayerContent::Image { .. }),
@@ -307,63 +326,96 @@ impl Tico {
             });
         }
 
-        let manifest = Manifest {
-            format: "tico".into(),
-            version: TICO_VERSION,
-            name: name.into(),
-            canvas: CANVAS_SIZE,
-            background: bg,
-            layers: layers_meta,
-        };
-        let manifest_json = serde_json::to_string_pretty(&manifest)?;
+        Ok((
+            archivekit::TicoManifest {
+                name: name.into(),
+                canvas: CANVAS_SIZE,
+                background: bg,
+                layers,
+            },
+            files,
+        ))
+    }
 
-        let out = std::fs::File::create(path.as_ref())?;
-        let mut zip = zip::ZipWriter::new(out);
-        let opts = zip::write::SimpleFileOptions::default();
-        zip.start_file("manifest.json", opts)?;
-        zip.write_all(manifest_json.as_bytes())?;
-        for (name, bytes) in &files {
-            zip.start_file(name, opts)?;
-            zip.write_all(bytes)?;
+    /// Pack an [`IconCanvas`] into `.tico` bytes (TICO container).
+    pub fn export_bytes(canvas: &IconCanvas, name: &str) -> Result<Vec<u8>, TicoError> {
+        let (manifest, files) = Self::build_manifest(canvas, name)?;
+        let mut builder = archivekit::TicoBuilder::new();
+        builder.set_manifest(manifest);
+        for (path, bytes) in &files {
+            if path.ends_with(".tlyr") {
+                builder.add_layer(path, bytes.clone())?;
+            } else {
+                builder.add_file(path, bytes.clone())?;
+            }
         }
-        zip.finish()?;
+        Ok(builder.finish()?)
+    }
+
+    /// Write an [`IconCanvas`] as `*.tico` (TICO container, no PNG files inside).
+    ///
+    /// Every layer is rasterized at full 1024px into one `layer/NN.tlyr` file.
+    /// Flat builder artwork compresses to a few KB per layer (1-100KB total).
+    /// Photo (`Image`) backgrounds are embedded as their own raster layer.
+    pub fn export(canvas: &IconCanvas, name: &str, path: impl AsRef<Path>) -> Result<(), TicoError> {
+        let bytes = Self::export_bytes(canvas, name)?;
+        std::fs::write(path.as_ref(), bytes)?;
         Ok(())
     }
 
     /// Load a `*.tico` file for rendering.
     pub fn load(path: impl AsRef<Path>) -> Result<TicoIcon, TicoError> {
-        let file = std::fs::File::open(path.as_ref())?;
-        let mut zip = zip::ZipArchive::new(file)?;
-        let mut raw = String::new();
-        zip.by_name("manifest.json")?.read_to_string(&mut raw)?;
-        let manifest: Manifest = serde_json::from_str(&raw)?;
-        if manifest.format != "tico" {
-            return Err(TicoError::Format("not a tico file".into()));
-        }
-        if manifest.version != TICO_VERSION {
-            return Err(TicoError::Format(format!("unsupported tico v{}", manifest.version)));
-        }
+        let bytes = std::fs::read(path.as_ref())?;
+        Self::load_bytes(&bytes)
+    }
+
+    /// Load `.tico` bytes for rendering.
+    pub fn load_bytes(bytes: &[u8]) -> Result<TicoIcon, TicoError> {
+        let mut reader = archivekit::TicoReader::from_bytes(bytes)?;
+        let manifest = reader.read_manifest()?;
 
         let mut read_layer = |file: &str| -> Result<RgbaImage, TicoError> {
-            let mut buf = Vec::new();
-            zip.by_name(file)?.read_to_end(&mut buf)?;
+            let buf = reader.read_file(file)?;
             decode_tlyr(&buf)
         };
 
         // Decode raster background (if any) and all layers.
         let bg_image = match &manifest.background {
-            TicoBackground::Raster { file } => Some(read_layer(file)?),
+            archivekit::TicoBackground::Raster { file } => Some(read_layer(file)?),
             _ => None,
+        };
+        let background = match &manifest.background {
+            archivekit::TicoBackground::Color { color } => TicoBackground::Color {
+                color: color.clone(),
+            },
+            archivekit::TicoBackground::Gradient { colors, positions, direction } => {
+                TicoBackground::Gradient {
+                    colors: colors.clone(),
+                    positions: positions.clone(),
+                    direction: direction_from_string(direction)?,
+                }
+            }
+            archivekit::TicoBackground::Raster { file } => TicoBackground::Raster {
+                file: file.clone(),
+            },
         };
         let mut layers = Vec::new();
         for meta in &manifest.layers {
             let image = read_layer(&meta.file)?;
-            layers.push(LoadedLayer { meta: meta.clone(), image });
+            layers.push(LoadedLayer {
+                meta: TicoLayerMeta {
+                    file: meta.file.clone(),
+                    opacity: meta.opacity,
+                    recolorable: meta.recolorable,
+                    default_color: meta.default_color.clone(),
+                },
+                image,
+            });
         }
 
         Ok(TicoIcon {
             name: manifest.name,
-            background: manifest.background,
+            background,
             bg_image,
             layers,
         })

@@ -168,7 +168,7 @@ pub mod generator;
 // Raster I/O helpers on top of CoreImage (crate-internal).
 pub(crate) mod img;
 
-// TICO icon container (ZIP-based `.tico` files with compact layer storage)
+// TICO icon container (ArchiveKit-based `.tico` files with compact layer storage)
 pub mod tico;
 
 // Color matrix recoloring

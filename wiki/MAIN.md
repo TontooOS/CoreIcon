@@ -22,7 +22,7 @@ Liquid Glass post-processing and text.
 | Icon Generator | [Generator.md](Generator.md) | `IconCanvas`, `Layer`, `Shadow`, `Background`, image processing pipeline, PNG generation |
 | TintMatrix | [TintMatrix.md](TintMatrix.md) | 4x5 color-matrix recoloring (Apple-style tint rows) |
 | AppIcon | [AppIcon.md](AppIcon.md) | High-level APIs: PNG to 3D app icon, dark mode + color options |
-| Tico | [Tico.md](Tico.md) | `.tico` icon container: ZIP-based layer storage with high-res tinted rendering |
+| Tico | [Tico.md](Tico.md) | `.tico` icon container: ArchiveKit-based layer storage with high-res tinted rendering |
 | Octopus | [Octopus.md](Octopus.md) | TontooOS octopus branding icons: `use_octopus` with PNG variant + `Color` tint |
 | OsVersion | [OsVersion.md](OsVersion.md) | OS version assets: `use_osversionicons` with `version` + `name` under `OSVersionAssets/` |
 | RuntimePaths | [RuntimePaths.md](RuntimePaths.md) | LiveOS asset lookup: sidecar-first resolvers for icons, branding and versioned assets |
@@ -66,6 +66,14 @@ See [Generator.md](Generator.md), [Color.md](Color.md) and
 
 ## Changelog
 
+- 2026-09-29: `.tico` moved from ZIP to the ArchiveKit TICO container (same
+  indexed engine as `.app`, own `TICO`/`TICF` magic, `manifest.fico`
+  FishFile manifest, `layer/*.tlyr` entries): new `Tico::export_bytes` /
+  `Tico::load_bytes`, `TicoError::Zip`/`Json` replaced by
+  `TicoError::Container`, `zip`/`serde_json` dependencies removed in favor
+  of `archivekit`; `examples/tico_demo/demo.tico` regenerated (2 layers);
+  container roundtrips covered by `tests/tico_container.rs`.
+  See [Tico.md](Tico.md).
 - 2026-09-28: Raster backend moved from the third-party `image` crate to CoreImage:
   file loading (`TiImage::load`), PNG layer coding (`codecs::png`), Lanczos scaling
   (`resize` / aspect-fit / fill-crop) and saving (`TiImage::save`, format from file
