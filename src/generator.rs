@@ -410,11 +410,16 @@ impl AppIcon {
     pub fn no_tint(mut self) -> Self { self.tint = None; self }
 
     /// Run the pipeline and return the finished 1024x1024 icon.
+    ///
+    /// The source is trimmed to its opaque bounding box and scaled to
+    /// completely fill the canvas (full-bleed, no transparent/gray margin),
+    /// then the squircle mask + Liquid Glass finish is applied.
     pub fn process(&self) -> Result<RgbaImage, Box<dyn std::error::Error>> {
-        let src = match &self.source {
-            AppIconSource::File(path) => resize_fit(&load_rgba(path)?, CANVAS_SIZE, CANVAS_SIZE),
-            AppIconSource::Image(img) => resize_exact(img, CANVAS_SIZE, CANVAS_SIZE),
+        let loaded = match &self.source {
+            AppIconSource::File(path) => load_rgba(path)?,
+            AppIconSource::Image(img) => img.clone(),
         };
+        let src = Self::trim_and_fill(&loaded)?;
 
         match self.appearance {
             Appearance::Light => {
@@ -598,6 +603,52 @@ impl AppIcon {
         let img = self.process()?;
         save_rgba(&img, path.as_ref())?;
         Ok(())
+    }
+
+    /// Trim fully transparent borders and scale to completely fill the
+    /// 1024x1024 canvas (full-bleed). Sources like `xcode.png` carry a
+    /// ~47px transparent padding plus rounded corners; without trimming
+    /// the finished icon keeps that margin and reads as a gray border in
+    /// viewers. `resize_fill` (cover + center-crop) avoids distortion for
+    /// non-square artwork while guaranteeing every canvas edge is opaque
+    /// before the squircle mask is applied.
+    fn trim_and_fill(src: &RgbaImage) -> Result<RgbaImage, Box<dyn std::error::Error>> {
+        let (w, h) = (src.width(), src.height());
+        let mut min_x = w;
+        let mut min_y = h;
+        let mut max_x = 0u32;
+        let mut max_y = 0u32;
+        for (px, py, p) in src.enumerate_pixels() {
+            if p[3] >= 10 {
+                if px < min_x { min_x = px; }
+                if py < min_y { min_y = py; }
+                if px > max_x { max_x = px; }
+                if py > max_y { max_y = py; }
+            }
+        }
+        // Empty or already full-bleed: just cover the canvas.
+        if max_x <= min_x || max_y <= min_y {
+            return Ok(resize_fill(src, CANVAS_SIZE, CANVAS_SIZE)?);
+        }
+        // Keep a 1px context ring so anti-aliased edges are not clipped.
+        min_x = min_x.saturating_sub(1);
+        min_y = min_y.saturating_sub(1);
+        max_x = (max_x + 1).min(w - 1);
+        max_y = (max_y + 1).min(h - 1);
+        // Already full-bleed (within 1px): no crop needed.
+        if min_x <= 1 && min_y <= 1 && max_x + 1 >= w - 1 && max_y + 1 >= h - 1 {
+            return Ok(resize_fill(src, CANVAS_SIZE, CANVAS_SIZE)?);
+        }
+        let cw = max_x - min_x + 1;
+        let ch = max_y - min_y + 1;
+        let mut cropped =
+            RgbaImage::from_pixel(cw, ch, coreimage::Rgba([0, 0, 0, 0]));
+        for y in 0..ch {
+            for x in 0..cw {
+                cropped.put_pixel(x, y, *src.get_pixel(min_x + x, min_y + y));
+            }
+        }
+        Ok(resize_fill(&cropped, CANVAS_SIZE, CANVAS_SIZE)?)
     }
 }
 
