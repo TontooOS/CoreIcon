@@ -3,7 +3,7 @@ crate-type = ["cdylib", "rlib"]
 
 [package]
 name = "coreicon"
-version = "26.1.0"
+version = "27.0.0"
 edition = "2021"
 authors = ["arlomu"]
 description = "Icon library & generator for TontooOS – SF Symbols with Color, Gradient, Transparency and PNG generation"

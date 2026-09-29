@@ -1,6 +1,6 @@
 //! OS version specific assets (`assets/TontooOS/OSVersionAssets/<version>/`).
 //!
-//! Provides the `use_osversionicons` API: give a version string (e.g. `"26.1.0"`)
+//! Provides the `use_osversionicons` API: give a version string (e.g. `"27.0.0"`)
 //! and a file name (e.g. `"TontooOS_Icon.png"`, `"seal.png"`, `"ocean.jpg"`)
 //! and get the decoded `RgbaImage` back.
 
@@ -43,8 +43,8 @@ pub fn resolve_os_version_base() -> PathBuf {
 
 /// Build the on-disk path for a versioned asset.
 ///
-/// Example: `os_version_path("26.1.0", "seal.png")`
-/// -> `"assets/TontooOS/OSVersionAssets/26.1.0/seal.png"`
+/// Example: `os_version_path("27.0.0", "seal.png")`
+/// -> `"assets/TontooOS/OSVersionAssets/27.0.0/seal.png"`
 /// (absolute under `/Library/System/...` on LiveOS when staged).
 pub fn os_version_path(version: &str, name: &str) -> String {
     // Normalise `name`: allow with or without extension already.
@@ -136,7 +136,7 @@ impl OsVersionIcon {
 
 /// Load an OS version asset.
 ///
-/// `version` is a folder under `OSVersionAssets` (e.g. `"26.1.0"`),
+/// `version` is a folder under `OSVersionAssets` (e.g. `"27.0.0"`),
 /// `name` is the file inside that folder (e.g. `"TontooOS_Icon.png"`,
 /// `"seal.png"`, `"ocean.jpg"`). Extension is required and matched
 /// case-insensitively on fallback.

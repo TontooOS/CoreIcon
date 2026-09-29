@@ -7,7 +7,7 @@ Liquid Glass post-processing and text.
 
 - Repository: https://github.com/TontooOS/CoreIcon
 - License: TCL
-- Version: 26.1.0
+- Version: 27.0.0
 
 ## Feature Index
 
@@ -133,7 +133,7 @@ See [Generator.md](Generator.md), [Color.md](Color.md) and
   ambient + key shadow, top gloss + diagonal sheen, gradient edge stroke,
   bottom shade, AA corner mask); `DARK_BACKGROUND` aligned to TontooOS dark
   `#1d1d1d`.
-- 2026-08-28: Added `Octopus` module (`use_octopus`, `OctopusVariant`, `OctopusIcon`) with `assets/TontooOS` branding PNGs and `Shaded` tint; added `OsVersion` module (`use_osversionicons`, `OsVersionIcon`) for `OSVersionAssets/<version>/<name>` (shipped `26.1.0`: `TontooOS_Icon.png`, `seal.png`, `ocean.jpg`) plus `available_versions`/`available_icons` discovery helpers.
+- 2026-08-28: Added `Octopus` module (`use_octopus`, `OctopusVariant`, `OctopusIcon`) with `assets/TontooOS` branding PNGs and `Shaded` tint; added `OsVersion` module (`use_osversionicons`, `OsVersionIcon`) for `OSVersionAssets/<version>/<name>` (shipped `27.0.0`: `TontooOS_Icon.png`, `seal.png`, `ocean.jpg`) plus `available_versions`/`available_icons` discovery helpers.
 - 2026-08-25: `Colorize` with `neutral_threshold(0)` now tints pure grays;
   added `ProcessOptions::protect_background` so Light+tint recolors monochrome
   artwork while only the flood-filled background is protected.
