@@ -40,6 +40,12 @@ Rasterizes every layer of an [`IconCanvas`](Generator.md) at 1024px into one `la
 
 Returns `Err` when a background image cannot be opened, a layer cannot be rasterized, the container has no layers, or the output file cannot be written.
 
+> **Note:** ArchiveKit validates the container and rejects an empty layer
+> table (`tico has no layers`). A canvas with only a background and no
+> layer therefore cannot be exported. Wrap flat artwork in one
+> `LayerContent::image` layer instead; image layers are stored
+> non-recolorable and keep their colors.
+
 ```rust
 use CoreIcon::generator::*;
 use CoreIcon::tico::Tico;
@@ -55,6 +61,30 @@ let icon = IconCanvas::new()
 
 Tico::export(&icon, "demo", "demo.tico")?;
 ```
+
+## Flat PNG to tico
+
+`examples/tico_from_png` converts an existing app-icon PNG into the
+container, which is what app bundles ship:
+
+```bash
+cargo run --release --manifest-path examples/tico_from_png/Cargo.toml -- \
+    Resources/app_icon.png Weather Weather.app/App/icon.tico preview.png
+```
+
+- The artwork becomes exactly one full-bleed `LayerContent::image`
+  layer over a transparent background, so the container has a layer
+  table and validates.
+- The layer is flagged non-recolorable, so `render` never tints it; the
+  Apple app icon finish is added by `TicoIcon::render`, not baked into
+  the stored layer.
+- Layers are stored at 1024px, so a smaller source is upscaled by the
+  rasterizer. A raster app icon lands around 3-4 MB per layer.
+- Prints the container size and layer count, then reloads the file and
+  writes a default render plus an accent-tinted render next to
+  `preview.png` (`preview-tinted.png`).
+- Exits with code `2` and a usage line when fewer than three arguments
+  are given, and returns an error when the input PNG does not exist.
 
 ## Load
 

@@ -66,6 +66,14 @@ See [Generator.md](Generator.md), [Color.md](Color.md) and
 
 ## Changelog
 
+- 2026-10-02: New `examples/tico_from_png` converts a flat app-icon
+  PNG into a valid layered `.tico`: the artwork becomes one
+  non-recolorable image layer over a transparent background, then
+  exports, reloads and renders previews. Written for the new format, where
+  ArchiveKit rejects a container with an empty layer table (a bare
+  `Background::image` canvas, which is what TBuild used to build, no
+  longer validates). See [Tico.md](Tico.md).
+
 - 2026-09-29: `.tico` moved from ZIP to the ArchiveKit TICO container (same
   indexed engine as `.app`, own `TICO`/`TICF` magic, `manifest.fico`
   FishFile manifest, `layer/*.tlyr` entries): new `Tico::export_bytes` /
