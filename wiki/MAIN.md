@@ -88,7 +88,11 @@ See [Generator.md](Generator.md), [Color.md](Color.md) and
   aliasing into ringing blobs that vibrancy then amplifies; the artwork
   silhouette is also morphologically smoothed and disc-rounded before the drop
   shadow, and the shadow's distance field is box-smoothed to drop chamfer
-  banding. The narrow diagonal gloss sheen is replaced by one broad
+  banding. Sharpness: the upscale prefilter is 30% of the scale factor rather
+  than the textbook half (one source pixel of sigma is 4.5 output pixels at
+  225 to 1024 and softens the whole icon), and the emboss bevel is 1.4% of the
+  canvas (~14px) rather than 3.8% (~39px), which read as a glow around the
+  glyph instead of a relief edge. The narrow diagonal gloss sheen is replaced by one broad
   off-center reflection lobe. `AppIcon` Light + `.tint()` now recolors the whole
   tile instead of protecting the background, `Shaded` became a three-tone ramp
   with a hue-preserving shadow floor and a highlight roll-off, and

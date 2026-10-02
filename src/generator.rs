@@ -1,4 +1,4 @@
-﻿use crate::tint::TintMatrix;
+use crate::tint::TintMatrix;
 use crate::{Color, Gradient, GradientDirection, SFSymbol};
 use crate::img::{load_rgba, resize_exact, resize_fill, resize_fit, save_rgba};
 use ab_glyph::{FontRef, PxScale, Font};
@@ -1237,7 +1237,7 @@ impl IconCanvas {
                 Self::apply_artwork_emboss(
                     &mut canvas, &placed, cw, ch,
                     d.light_x, d.light_y,
-                    CANVAS_SIZE as f32 * 0.038,
+                    CANVAS_SIZE as f32 * 0.014,
                     d.artwork_emboss,
                 );
             }
@@ -1895,14 +1895,22 @@ impl IconCanvas {
 
     /// Prefilter radius for an upscale from `from` to `to` pixels.
     ///
-    /// Half the upscale factor is the textbook reconstruction cutoff. It is
-    /// clamped to `0..=3`: below 2x there is no staircase left to suppress,
-    /// and beyond 3x the source is too small for the artwork to carry any
-    /// real detail anyway, so a wider kernel would only soften the result.
+    /// 30% of the upscale factor, clamped to `0..=3`. This is a sharpness
+    /// versus ringing trade-off, not a textbook cutoff:
+    ///
+    /// - At the textbook half-factor the sigma reaches one source pixel,
+    ///   which is 4.5 output pixels for a 225px logo scaled to 1024. That is
+    ///   enough prefilter to visibly soften the whole icon.
+    /// - At zero the one-pixel staircase along a diagonal survives the
+    ///   upscale as visible stepping.
+    /// - In between the staircase is gone and the icon still reads sharp.
+    ///
+    /// Past about 3x the source is too small for the artwork to carry real
+    /// detail anyway, so a wider kernel would only cost sharpness.
     fn prefilter_radius(from: u32, to: u32) -> usize {
         if from == 0 || to <= from { return 0; }
         let scale = to as f32 / from as f32;
-        ((scale * 0.5).round() as usize).clamp(0, 3)
+        ((scale * 0.3).round() as usize).clamp(0, 3)
     }
 
     /// Binomial (Gaussian-approximating) blur with the given radius.
@@ -2201,6 +2209,10 @@ impl IconCanvas {
     /// printed on the tile and artwork that looks extruded from it. The
     /// depth ramp is driven by the signed distance field, so it follows the
     /// real silhouette (including concave notches) instead of a blur.
+    ///
+    /// `bevel` wants to stay narrow - roughly 1.4% of the canvas. Widening
+    /// it stops reading as a relief edge and starts reading as a glow
+    /// around the glyph, which is what makes an icon look blurry.
     fn apply_artwork_emboss(
         img: &mut RgbaImage,
         mask: &[bool],

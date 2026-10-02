@@ -386,7 +386,11 @@ sharp upscale turns into visible speckle along every glyph edge, and that
   (`0.30`). Real edges and thin lines deviate far more and are left alone.
 - One-pixel staircase aliasing along diagonals, which a sharp reconstruction
   filter turns into ringing blobs. Removed by a binomial prefilter of
-  `prefilter_radius(from, to)` = half the upscale factor, clamped to `0..=3`.
+  `prefilter_radius(from, to)` = 30% of the upscale factor, clamped to
+  `0..=3`. This is a sharpness-versus-ringing trade-off rather than a textbook
+  cutoff: at the textbook half-factor the sigma reaches one source pixel, which
+  is 4.5 output pixels for a 225px logo scaled to 1024 and visibly softens the
+  whole icon; at zero the staircase survives as visible stepping.
 
 Both run **before** the upscale, because after it the grain is a five-pixel
 blob that no detail-preserving median can still remove, and the staircase has
@@ -441,10 +445,14 @@ Builder for all depth effects; defaults switch every effect off.
 
 Bevels the artwork silhouette toward and away from the light: edges facing the
 light get a soft white lift, the opposite edges a soft dark bevel, both fading
-over ~3.8% of the canvas into the interior. The depth ramp comes from a signed
+over ~1.4% of the canvas into the interior. The depth ramp comes from a signed
 distance field of the silhouette, so it follows the real outline including
 concave notches. This is what separates artwork that reads as extruded from the
 tile from artwork that reads as printed on it.
+
+The bevel wants to stay narrow. Widening it stops reading as a relief edge and
+starts reading as a glow around the glyph, which is what makes an icon look
+blurry.
 
 Apple presets:
 
