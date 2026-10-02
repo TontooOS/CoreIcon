@@ -50,9 +50,11 @@ post-processing effects start at zero.
 |---|---|---|
 | `background` | `background(bg: Background) -> Self` | Fill the entire canvas |
 | `corner_radius` | `corner_radius(r: f32) -> Self` | Round the canvas edges (`0` = square, `APPLE_CORNER_RADIUS` = `232.0` for the Apple squircle) |
+| `squircle_exponent` | `squircle_exponent(n: f32) -> Self` | Corner-curve exponent: `2.0` = circular rounded rect, `APPLE_SQUIRCLE_EXPONENT` (`5.0`) = Apple continuous curvature. Clamped to `2.0`–`8.0` |
+| `artwork_emboss` | `artwork_emboss(s: f32) -> Self` | Raised-relief bevel on the layer silhouettes, `0.0`–`1.0` |
 | `frosted` | `frosted(opacity: f32) -> Self` | White glass wash, `0.0`–`1.0` |
 | `specular` | `specular(opacity: f32) -> Self` | Glossy rim highlight on light-facing edges |
-| `gloss` | `gloss(opacity: f32) -> Self` | Full-surface top gloss + diagonal sheen (Apple Liquid Glass) |
+| `gloss` | `gloss(opacity: f32) -> Self` | Full-surface top gloss plus one broad off-center reflection lobe (Apple Liquid Glass) |
 | `vibrancy` | `vibrancy(v: f32) -> Self` | Saturation + contrast pop for flat artwork |
 | `shade` | `shade(opacity: f32) -> Self` | Bottom inner shade that grounds the icon |
 | `inner_depth` | `inner_depth(blur: f32, opacity: f32) -> Self` | Inner shadow on the side away from the light |
@@ -76,10 +78,14 @@ The render order is:
 1. Background fill
 2. All layers (in order: `shadow`, then element content)
 3. Frosted wash (if enabled)
-4. Light-steered glass effects: vibrancy, specular rim, top gloss + sheen,
-   inner depth, bottom shade, gradient edge stroke
-5. Anti-aliased corner mask (1px feather, pixel-correct: edge centers stay
-   fully opaque, only texels straddling the edge fade)
+4. Light-steered glass effects: vibrancy, specular rim, top gloss, inner depth,
+   bottom shade, gradient edge stroke
+5. Anti-aliased squircle corner mask (1px feather, pixel-correct: edge centers
+   stay fully opaque, only texels straddling the edge fade)
+
+Every band in steps 4 and 5 is driven by one squircle signed distance field, so
+the rim light, bevel, edge stroke and mask follow the same curve. See
+[Squircle mask](#squircle-mask).
 
 ### Liquid Glass preset
 
@@ -87,14 +93,33 @@ The render order is:
 
 ```rust
 let icon = IconCanvas::new()
-    .glass()          // corner 232, frosted 0.08, specular 0.50,
-    // ... layers ... // inner_depth(52, 0.38), edge(3, 0.60),
-                      // gloss 0.24, vibrancy 0.18, shade 0.20
+    .glass()          // corner 232, squircle n=5, frosted 0.08, specular 0.55,
+    // ... layers ... // inner_depth(64, 0.42), edge(3, 0.62),
+                      // gloss 0.20, vibrancy 0.24, shade 0.24, emboss 0.55
     .background(Background::color(Color::from_hex("#2255AA").unwrap()))
 ;
 ```
 
 Every value can be overridden by calling the individual builders afterwards.
+
+### Squircle mask
+
+The corner is a superellipse `|u|^n + |v|^n = 1` inside the `r x r` corner box,
+blended into straight edges. `n = 2.0` reproduces a plain circular rounded
+rect exactly, so callers that want the old silhouette ask for `2.0`.
+`n = 5.0` (`APPLE_SQUIRCLE_EXPONENT`) is the Apple shape: the curvature grows
+continuously out of the straight edge instead of stepping to `1 / r` at the
+tangent point.
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `APPLE_CORNER_RADIUS` | `232.0` | Corner box size for a 1024px icon (22.65%) |
+| `APPLE_SQUIRCLE_EXPONENT` | `5.0` | Apple continuous-curvature exponent |
+
+The field is a true Euclidean distance in pixels (negative inside), so
+band-limited effects can window it directly. Pixels past the flat zone on one
+axis but still inside it on the other fall back to the straight edge instead of
+the corner curve.
 
 ## Background
 
@@ -239,15 +264,15 @@ values are greater than zero.
 |---|---|---|
 | Frosted | `opacity` | Blends white over every opaque pixel; simulates frosted glass |
 | Vibrancy | `v` | Saturation + contrast pop; near-grays (whites/blacks) are skipped |
-| Specular | `opacity` | Bright rim on the edges facing the light (rim lighting via the rounded-rect surface normal), fading inward over ~3.5% of the canvas |
-| Gloss | `opacity` | Soft white gradient over the top ~45% plus a diagonal sheen band (Apple Liquid Glass) |
+| Specular | `opacity` | Bright rim on the edges facing the light (rim lighting via the squircle surface normal), fading inward over ~3.5% of the canvas |
+| Gloss | `opacity` | Soft white gradient over the top ~52% plus one broad off-center reflection lobe (Apple Liquid Glass). There is no narrow diagonal band: a tight streak reads as a scratch across the artwork |
 | Inner Depth | `blur`, `opacity` | Darkens the inside edge on the side away from the light |
 | Bottom Shade | `opacity` | Dark gradient over the bottom ~26% that grounds the icon |
 | Edge Highlight | `width`, `opacity` | Gradient stroke along the inside edge: full strength on the light side, ~35% opposite; plus a thin dark outer rim on the shadow side |
 
 All light-steered effects share `light_direction(x, y)`. The vector
 points toward the light source; the default is top-left (`-0.45, -0.89`).
-Because the specular band uses the surface normal of the rounded rect, the
+Because the specular band uses the surface normal of the squircle, the
 sheen wraps around corners like real glass.
 
 For the Apple Liquid Glass look, either combine them manually or use
@@ -256,12 +281,14 @@ For the Apple Liquid Glass look, either combine them manually or use
 ```rust
 let icon = IconCanvas::new()
     .corner_radius(232.0)
-    .gloss(0.24)
-    .vibrancy(0.18)
-    .specular(0.50)
-    .inner_depth(52.0, 0.38)
-    .shade(0.20)
-    .edge_highlight(3.0, 0.60)
+    .squircle_exponent(5.0)
+    .gloss(0.20)
+    .vibrancy(0.24)
+    .specular(0.55)
+    .inner_depth(64.0, 0.42)
+    .shade(0.24)
+    .edge_highlight(3.0, 0.62)
+    .artwork_emboss(0.55)
     // ... layers ...
 ;
 ```
@@ -328,14 +355,38 @@ pub fn process_file(
 pub fn process_image(src: &RgbaImage, options: &ProcessOptions) -> RgbaImage
 ```
 
-`process_file` loads and scales the source to exactly 1024x1024, then runs the
-same pipeline as `process_image`. Pipeline order:
+`process_file` loads the source, cleans it up at its **native** resolution and
+scales it to exactly 1024x1024, then runs the same pipeline as
+`process_image`. Pipeline order:
 
-1. Background replacement (flood fill from the edges)
-2. Recolor (`RecolorOptions`)
-3. Dual shadow (distance transform) -> content -> vibrancy -> gloss +
-   sheen -> specular -> inner depth -> bottom shade -> gradient edge stroke
-4. Anti-aliased corner mask
+1. Despeckle + upscale prefilter (source resolution, see below)
+2. Background replacement (flood fill from the edges)
+3. Recolor (`RecolorOptions`)
+4. Dual shadow (distance transform) -> artwork shadow -> content -> artwork
+   emboss -> vibrancy -> gloss -> specular -> inner depth -> bottom shade ->
+   gradient edge stroke
+5. Anti-aliased squircle corner mask
+
+#### Source cleanup
+
+Low-resolution sources (a 225px logo scaled to 1024) carry two defects that a
+sharp upscale turns into visible speckle along every glyph edge, and that
+`vibrancy` then amplifies because it boosts saturation and contrast:
+
+- One-to-three-pixel compression grain. Removed by a `5x5` median that only
+  replaces pixels deviating from the local median by at most `GRAIN_CEILING`
+  (`0.30`). Real edges and thin lines deviate far more and are left alone.
+- One-pixel staircase aliasing along diagonals, which a sharp reconstruction
+  filter turns into ringing blobs. Removed by a binomial prefilter of
+  `prefilter_radius(from, to)` = half the upscale factor, clamped to `0..=3`.
+
+Both run **before** the upscale, because after it the grain is a five-pixel
+blob that no detail-preserving median can still remove, and the staircase has
+already rung.
+
+```rust
+pub const GRAIN_CEILING: f32 = 0.30;
+```
 
 ```rust
 pub struct ProcessOptions {
@@ -349,12 +400,15 @@ pub struct ProcessOptions {
 `protect_background: true` excludes the flood-filled background region from
 recoloring. The mask uses reference `0.25` / chain `0.14`: strict enough to
 reject saturated artwork (a purple petal is `0.31` from light gray) while still
-spanning shaded glass gradients. The border palette is built from the 1px-inset
-border with fully opaque pixels only (`alpha >= 128`), so the AA edge ring
+spanning shaded glass gradients. The border palette is built from the corner
+squares with fully opaque pixels only (`alpha >= 128`), so the AA edge ring
 never poisons it, and the flood passes through transparent edge texels to the
 first opaque row. Feathered edge texels (`alpha < 128`) are always protected,
-so old AA rings never tint into a fringe. This is how `AppIcon` Light+tint
-colors artwork while keeping the original background.
+so old AA rings never tint into a fringe.
+
+The flood mask is also smoothed morphologically before it drives the artwork
+shadow and the emboss, because a ragged silhouette becomes a dotted shadow once
+a distance transform blurs it.
 
 ### `DepthOptions`
 
@@ -365,18 +419,30 @@ Builder for all depth effects; defaults switch every effect off.
 | `DepthOptions::new(corner_radius)` | Start with a corner radius, effects off |
 | `.shadow(s)` | Dual drop shadow: large soft ambient + tight key (`Shadow`); key is synthesized when `blur > 12` |
 | `.artwork_shadow(s)` | Glyph drop shadow onto the background (file pipeline only; foreground = inverse of the border flood mask) |
+| `.artwork_emboss(strength)` | Raised relief on the artwork silhouette, `0.0` off / `0.45`–`0.70` Apple-strong |
 | `.inner_depth(blur, opacity)` | Inner bevel away from the light |
 | `.specular(opacity)` | Rim highlight toward the light |
-| `.gloss(opacity)` | Top gloss + diagonal sheen |
+| `.gloss(opacity)` | Top gloss + broad reflection lobe |
 | `.vibrancy(v)` | Saturation + contrast pop |
 | `.shade(opacity)` | Bottom grounding shade |
 | `.edge_highlight(width, opacity)` | Gradient edge stroke + dark outer rim on the shadow side |
+| `.squircle_exponent(n)` | Corner-curve exponent, `2.0` circle to `8.0` |
 | `.light_direction(x, y)` | Light source vector, default top-left (`-0.45, -0.89`) |
+
+#### `artwork_emboss`
+
+Bevels the artwork silhouette toward and away from the light: edges facing the
+light get a soft white lift, the opposite edges a soft dark bevel, both fading
+over ~3.8% of the canvas into the interior. The depth ramp comes from a signed
+distance field of the silhouette, so it follows the real outline including
+concave notches. This is what separates artwork that reads as extruded from the
+tile from artwork that reads as printed on it.
 
 Apple presets:
 
 ```rust
 pub const APPLE_CORNER_RADIUS: f32 = 232.0;
+pub const APPLE_SQUIRCLE_EXPONENT: f32 = 5.0;
 pub fn default_app_icon_depth() -> DepthOptions; // Apple-strong AppIcon finish
 pub fn apple_liquid_glass(corner_radius: f32) -> DepthOptions; // same finish, custom radius
 ```

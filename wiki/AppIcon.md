@@ -21,6 +21,7 @@ Both APIs live in `CoreIcon::generator`:
 pub enum Appearance { Light, Dark }
 pub const DARK_BACKGROUND: Color; // TontooOS dark #1d1d1d
 pub const APPLE_CORNER_RADIUS: f32 = 232.0;
+pub const APPLE_SQUIRCLE_EXPONENT: f32 = 5.0;
 pub fn default_app_icon_depth() -> DepthOptions;
 pub fn apple_liquid_glass(corner_radius: f32) -> DepthOptions;
 
@@ -37,11 +38,19 @@ let icon = IconCanvas::png_to_3d_icon("logo.png")?;
 icon.save("app-icon.png")?;
 ```
 
-Takes any flat image, scales it to exactly 1024x1024, rounds it into the
-Apple squircle (`APPLE_CORNER_RADIUS 232`) and adds the Apple-strong Liquid
-Glass finish: dual drop shadow (ambient + key), vibrancy pop, top gloss +
-diagonal sheen, specular rim, wide inner bevel, bottom shade, gradient edge
-stroke and an anti-aliased corner mask. Colors are left completely untouched.
+Takes any flat image, trims it to its opaque bounding box, scales it to
+completely fill 1024x1024 (full-bleed, no transparent margin), rounds it into
+the Apple squircle (`APPLE_CORNER_RADIUS 232`, exponent
+`APPLE_SQUIRCLE_EXPONENT 5`) and adds the Apple Liquid Glass finish: dual drop
+shadow (ambient + key), raised-relief emboss on the artwork, vibrancy pop, wide
+inner bevel, rim specular, top gloss, bottom shade and an anti-aliased corner
+mask. Colors are left completely untouched.
+
+Before scaling, the source is despeckled and prefiltered at its own resolution.
+A small logo carries one-to-three-pixel compression grain and a one-pixel
+staircase along its diagonals; a sharp upscale spreads both into ringing blobs
+that the vibrancy pass turns into visible speckle along every glyph edge. See
+[Generator.md](Generator.md#source-cleanup).
 
 ## API 2: `AppIcon`
 
@@ -65,20 +74,42 @@ Default equals API 1. Options combine freely:
 
 | Call chain | Background | Artwork |
 |---|---|---|
-| `from_file(..)` | Original | Original colors + vibrancy pop + full Apple glass finish |
+| `from_file(..)` | Original | Original colors + raised-relief emboss + vibrancy pop + full Apple glass finish |
 | `.. .dark()` | TontooOS dark `#1d1d1d` | Original colors preserved (a blue VS Code logo stays blue); small white interior cutouts follow the background (size-gated remap, tolerance `0.25`) |
-| `.. .tint(c)` (Light) | Original (untouched) | Luminance-graded `Shaded` replacement toward `c`: all petals share one hue while overlaps stay darker; background (incl. shaded glass) is flood-protected |
+| `.. .tint(c)` (Light) | Takes the tint hue too | Luminance-graded `Shaded` replacement toward `c`: all planes share one hue while overlaps stay darker |
 | `.. .dark().tint(c)` | TontooOS dark `#1d1d1d` | Luminance-graded `Shaded` replacement toward `c`; interior cutouts follow the background |
 
-The Apple glass finish (`gloss 0.24`, `vibrancy 0.22`, `specular 0.50`,
-`inner_depth(52, 0.38)`, `edge(3, 0.60)`, `shade 0.20`) is always applied.
-For a custom radius with the same finish, use
+> **Note:** Light + `.tint()` recolors the **whole tile**, background included,
+> the way a tinted Home Screen icon does. Earlier versions protected the
+> background, so `.tint()` only ever touched the artwork and the icon never
+> read as recolored as a whole.
+
+The Apple glass finish (`gloss 0.20`, `vibrancy 0.24`, `specular 0.55`,
+`inner_depth(64, 0.42)`, `edge(3, 0.62)`, `shade 0.24`, `artwork_emboss 0.60`)
+is always applied. For a custom radius with the same finish, use
 `apple_liquid_glass(radius)` with `process_file` / `process_image`.
 
 > **Note:** `.light()` is the default appearance and only matters to undo a
 > previous `.dark()` in a builder chain.
 
 Returns `Err` when the source file cannot be opened or decoded.
+
+### How the tint keeps its shape
+
+`RecolorMode::Shaded` is a three-tone ramp rather than a multiply:
+
+1. The source lightness is normalized against the tint's own lightness, so the
+   brightest plane maps to the full tint.
+2. A `0.46` shadow floor keeps shadows at a fraction of the tint instead of
+   driving them to black, so they stay the same hue. This is what makes
+   recolored artwork read as one material instead of a stencil.
+3. Highlights above `0.82` lightness roll off toward white, so the brightest
+   planes get a specular lift instead of clipping flat at the tint value.
+
+Semi-transparent pixels are un-premultiplied before recoloring and
+re-premultiplied after. Recoloring the stored value reads the anti-aliased
+fringe as a washed-out mid tone, which shows up as a halo of the old hue around
+every glyph.
 
 ### How the dark mode keeps colors
 

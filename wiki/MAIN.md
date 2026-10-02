@@ -66,6 +66,36 @@ See [Generator.md](Generator.md), [Color.md](Color.md) and
 
 ## Changelog
 
+- 2026-10-02: App-icon look overhaul, driven by a comparison against Apple
+  reference renders. New `DepthOptions::squircle_exponent` /
+  `IconCanvas::squircle_exponent` plus `APPLE_SQUIRCLE_EXPONENT` (`5.0`): the
+  corner is now a real superellipse with continuous curvature instead of a
+  circular arc, and every depth band (specular, gloss, inner depth, edge
+  stroke, corner mask) follows the new signed distance field. `n = 2.0`
+  reproduces the old circular silhouette exactly. New
+  `DepthOptions::artwork_emboss` / `IconCanvas::artwork_emboss` (`0.0` off,
+  `0.60` in the Apple preset): a raised-relief bevel on the artwork silhouette
+  driven by a signed distance field, so glyphs read as extruded from the tile
+  rather than printed on it. Speckle removed at its source: new source
+  despeckle (`5x5` conditional median, `GRAIN_CEILING` `0.30`) and an upscale
+  prefilter (binomial, half the scale factor) both run at the **source**
+  resolution, because a sharp upscale spreads one-pixel grain and staircase
+  aliasing into ringing blobs that vibrancy then amplifies; the artwork
+  silhouette is also morphologically smoothed and disc-rounded before the drop
+  shadow, and the shadow's distance field is box-smoothed to drop chamfer
+  banding. The narrow diagonal gloss sheen is replaced by one broad
+  off-center reflection lobe. `AppIcon` Light + `.tint()` now recolors the whole
+  tile instead of protecting the background, `Shaded` became a three-tone ramp
+  with a hue-preserving shadow floor and a highlight roll-off, and
+  `recolor_pixels` un-premultiplies before recoloring to kill tinted halos.
+  Background replacement only decontaminates semi-transparent texels, so opaque
+  edge pixels are no longer pulled toward unrelated neighbors. Apple preset
+  retuned: shadow `24/48/0.38` -> `30/58/0.42`, artwork shadow `18/30/0.30` ->
+  `22/34/0.34`, inner depth `52/0.38` -> `64/0.42`, specular `0.50` -> `0.55`,
+  gloss `0.24` -> `0.20`, vibrancy `0.22` -> `0.24`, shade `0.20` -> `0.24`.
+  The previously failing `tests/zz_xcode_check` now passes.
+  See [AppIcon.md](AppIcon.md), [Generator.md](Generator.md).
+
 - 2026-10-02: New `examples/tico_from_png` converts a flat app-icon
   PNG into a valid layered `.tico`: the artwork becomes one
   non-recolorable image layer over a transparent background, then

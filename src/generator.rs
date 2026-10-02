@@ -1,4 +1,4 @@
-use crate::tint::TintMatrix;
+﻿use crate::tint::TintMatrix;
 use crate::{Color, Gradient, GradientDirection, SFSymbol};
 use crate::img::{load_rgba, resize_exact, resize_fill, resize_fit, save_rgba};
 use ab_glyph::{FontRef, PxScale, Font};
@@ -67,7 +67,7 @@ pub struct RecolorOptions {
     /// recolored - e.g. a background that was already swapped to a flat
     /// color in the same pipeline run.
     pub protect: Option<Color>,
-    /// Euclidean RGB distance (0.0–1.0 space) for [`Self::protect`].
+    /// Euclidean RGB distance (0.0â€“1.0 space) for [`Self::protect`].
     pub protect_tolerance: f32,
     /// Pixels within [`Self::remap_tolerance`] of this color are replaced
     /// outright by [`Self::remap_to`] before any mode is applied - e.g. an
@@ -75,10 +75,10 @@ pub struct RecolorOptions {
     pub remap_from: Option<Color>,
     /// Replacement target for [`Self::remap_from`].
     pub remap_to: Option<Color>,
-    /// Euclidean RGB distance (0.0–1.0 space) for the remap rule.
+    /// Euclidean RGB distance (0.0â€“1.0 space) for the remap rule.
     pub remap_tolerance: f32,
     /// When set, the remap only applies to connected components smaller
-    /// than this fraction of the image area (`0.0`–`1.0`). `None` (default)
+    /// than this fraction of the image area (`0.0`â€“`1.0`). `None` (default)
     /// remaps every matching pixel. Use e.g. `Some(0.10)` so small holes /
     /// cutouts follow the swapped background while large foreground shapes
     /// (white glyphs, bubbles) survive.
@@ -149,6 +149,15 @@ pub struct DepthOptions {
     pub vibrancy: f32,
     /// Bottom inner shade (grounds the icon). 0.0 = off, 0.18-0.22 = Apple.
     pub shade_opacity: f32,
+    /// Corner-curve exponent of the icon mask. `2.0` is a plain circular
+    /// rounded rect, [`APPLE_SQUIRCLE_EXPONENT`] (`5.0`) is the Apple
+    /// continuous-curvature squircle. Every depth effect follows it.
+    pub corner_exponent: f32,
+    /// Raised-relief emboss on the artwork silhouette. `0.0` = off,
+    /// `0.45`-`0.70` = Apple-strong. Lightens glyph edges that face the
+    /// light and darkens the opposite side, so flat artwork reads as
+    /// extruded instead of printed.
+    pub artwork_emboss: f32,
 }
 
 impl Default for DepthOptions {
@@ -167,6 +176,8 @@ impl Default for DepthOptions {
             gloss_opacity: 0.0,
             vibrancy: 0.0,
             shade_opacity: 0.0,
+            corner_exponent: APPLE_SQUIRCLE_EXPONENT,
+            artwork_emboss: 0.0,
         }
     }
 }
@@ -193,6 +204,16 @@ impl DepthOptions {
     pub fn vibrancy(mut self, v: f32) -> Self { self.vibrancy = v.clamp(0.0, 1.0); self }
     /// Bottom inner shade that grounds the icon.
     pub fn shade(mut self, opacity: f32) -> Self { self.shade_opacity = opacity.clamp(0.0, 1.0); self }
+    /// Corner-curve exponent: `2.0` circle, `5.0` Apple squircle.
+    pub fn squircle_exponent(mut self, n: f32) -> Self {
+        self.corner_exponent = n.clamp(2.0, 8.0);
+        self
+    }
+    /// Raised-relief emboss strength for the artwork silhouette.
+    pub fn artwork_emboss(mut self, strength: f32) -> Self {
+        self.artwork_emboss = strength.clamp(0.0, 1.0);
+        self
+    }
     pub fn light_direction(mut self, x: f32, y: f32) -> Self {
         let len = (x * x + y * y).sqrt();
         if len > 0.0001 { self.light_x = x / len; self.light_y = y / len; }
@@ -241,9 +262,9 @@ pub struct ProcessOptions {
     pub protect_background: bool,
 }
 
-// ═══════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // High-level app icon APIs
-// ═══════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 /// Background appearance for [`AppIcon`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -269,35 +290,55 @@ pub const DARK_REMAP_MAX_FRACTION: f32 = 0.10;
 /// Apple-style squircle radius for 1024px icons (22.65%).
 pub const APPLE_CORNER_RADIUS: f32 = 232.0;
 
+/// Corner-curve exponent of the Apple icon mask.
+///
+/// `2.0` is a circular rounded rect (a plain quarter-circle corner);
+/// `5.0` is the continuous-curvature squircle Apple ships, where the
+/// curvature keeps growing out of the straight edge instead of jumping
+/// to `1 / radius` at the tangent point.
+pub const APPLE_SQUIRCLE_EXPONENT: f32 = 5.0;
+
+/// Maximum per-channel deviation from the local median that still counts as
+/// compression grain rather than real artwork detail.
+///
+/// Above this the pixel is left alone: genuine edges and thin lines deviate
+/// far more than the one-to-three-pixel grain blocks that low-resolution
+/// sources carry, so the filter never eats them.
+pub const GRAIN_CEILING: f32 = 0.30;
+
 /// Default Liquid Glass finish for app icons (Apple-strong).
 ///
 /// Matches iOS 26 / macOS Tahoe icon rendering: large soft ambient shadow,
 /// wide inner bevel, bright rim specular, full-surface top gloss, vibrancy
-/// pop and a grounding bottom shade.
+/// pop, raised-relief emboss on the artwork and a grounding bottom shade.
 pub fn default_app_icon_depth() -> DepthOptions {
     DepthOptions::new(APPLE_CORNER_RADIUS)
-        .shadow(Shadow::new().offset(0.0, 24.0).blur(48.0).opacity(0.38))
-        .artwork_shadow(Shadow::new().offset(0.0, 18.0).blur(30.0).opacity(0.30))
-        .inner_depth(52.0, 0.38)
-        .specular(0.50)
-        .edge_highlight(3.0, 0.60)
-        .gloss(0.24)
-        .vibrancy(0.22)
-        .shade(0.20)
+        .squircle_exponent(APPLE_SQUIRCLE_EXPONENT)
+        .shadow(Shadow::new().offset(0.0, 30.0).blur(58.0).opacity(0.42))
+        .artwork_shadow(Shadow::new().offset(0.0, 22.0).blur(34.0).opacity(0.34))
+        .artwork_emboss(0.60)
+        .inner_depth(64.0, 0.42)
+        .specular(0.55)
+        .edge_highlight(3.0, 0.62)
+        .gloss(0.20)
+        .vibrancy(0.24)
+        .shade(0.24)
 }
 
 /// One-call Apple Liquid Glass finish for any [`DepthOptions`].
 /// Use when building custom pipelines that should look like `AppIcon`.
 pub fn apple_liquid_glass(corner_radius: f32) -> DepthOptions {
     DepthOptions::new(corner_radius)
-        .shadow(Shadow::new().offset(0.0, 24.0).blur(48.0).opacity(0.38))
-        .artwork_shadow(Shadow::new().offset(0.0, 18.0).blur(30.0).opacity(0.30))
-        .inner_depth(52.0, 0.38)
-        .specular(0.50)
-        .edge_highlight(3.0, 0.60)
-        .gloss(0.24)
-        .vibrancy(0.22)
-        .shade(0.20)
+        .squircle_exponent(APPLE_SQUIRCLE_EXPONENT)
+        .shadow(Shadow::new().offset(0.0, 30.0).blur(58.0).opacity(0.42))
+        .artwork_shadow(Shadow::new().offset(0.0, 22.0).blur(34.0).opacity(0.34))
+        .artwork_emboss(0.60)
+        .inner_depth(64.0, 0.42)
+        .specular(0.55)
+        .edge_highlight(3.0, 0.62)
+        .gloss(0.20)
+        .vibrancy(0.24)
+        .shade(0.24)
 }
 
 /// Palette entry extracted from opaque border pixels.
@@ -430,13 +471,20 @@ impl AppIcon {
                     protect_background: false,
                 };
                 if let Some(tint) = self.tint {
-                    options.protect_background = true;
-                    // Luminance-graded `Shaded` replacement: every artwork
-                    // pixel becomes the tint scaled by its lightness, so all
-                    // petals share one hue while overlaps stay darker. Unlike
-                    // `Colorize` (which keeps each hue's own lightness and
-                    // turns yellows pale and greens dark), `Shaded` clamps
-                    // light pixels to the full tint for a uniform result.
+                    // Full-tile recolor: the background takes the tint hue
+                    // too, like a tinted Home Screen icon. Protecting the
+                    // background here left the tile in its original color,
+                    // so `.tint()` only ever touched the artwork and the
+                    // icon never read as recolored as a whole.
+                    //
+                    // Luminance-graded `Shaded` replacement: every pixel
+                    // becomes the tint scaled by its lightness, so all
+                    // planes share one hue while overlaps stay darker.
+                    // Unlike `Colorize` (which keeps each hue's own
+                    // lightness and turns yellows pale and greens dark),
+                    // `Shaded` clamps light pixels to the full tint, keeps
+                    // shadows at a hue-preserving fraction of it and lifts
+                    // highlights toward white.
                     options.recolor = Some(
                         RecolorOptions::new(tint, 1.0).mode(RecolorMode::Shaded),
                     );
@@ -626,9 +674,23 @@ impl AppIcon {
                 if py > max_y { max_y = py; }
             }
         }
+        // Despeckle at source resolution, before any scaling. Grain is one to
+        // three pixels wide here; after a 4.5x upscale it is a five-pixel
+        // blob that no detail-preserving median can still remove.
+        let mut cleaned = IconCanvas::despeckle(src, GRAIN_CEILING);
+        // Prefilter for the upscale. A 225px logo has a one-pixel staircase
+        // along every diagonal; a sharp reconstruction filter turns that
+        // staircase into ringing blobs a few pixels wide in the finished
+        // icon, which the vibrancy pass then turns into visible speckle.
+        // Blurring by half the upscale factor at source resolution is the
+        // standard prefilter and removes it before it can ring.
+        cleaned = IconCanvas::binomial_blur(
+            &cleaned,
+            IconCanvas::prefilter_radius(src.width(), CANVAS_SIZE),
+        );
         // Empty or already full-bleed: just cover the canvas.
         if max_x <= min_x || max_y <= min_y {
-            return Ok(resize_fill(src, CANVAS_SIZE, CANVAS_SIZE)?);
+            return Ok(resize_fill(&cleaned, CANVAS_SIZE, CANVAS_SIZE)?);
         }
         // Keep a 1px context ring so anti-aliased edges are not clipped.
         min_x = min_x.saturating_sub(1);
@@ -637,7 +699,7 @@ impl AppIcon {
         max_y = (max_y + 1).min(h - 1);
         // Already full-bleed (within 1px): no crop needed.
         if min_x <= 1 && min_y <= 1 && max_x + 1 >= w - 1 && max_y + 1 >= h - 1 {
-            return Ok(resize_fill(src, CANVAS_SIZE, CANVAS_SIZE)?);
+            return Ok(resize_fill(&cleaned, CANVAS_SIZE, CANVAS_SIZE)?);
         }
         let cw = max_x - min_x + 1;
         let ch = max_y - min_y + 1;
@@ -645,16 +707,16 @@ impl AppIcon {
             RgbaImage::from_pixel(cw, ch, coreimage::Rgba([0, 0, 0, 0]));
         for y in 0..ch {
             for x in 0..cw {
-                cropped.put_pixel(x, y, *src.get_pixel(min_x + x, min_y + y));
+                cropped.put_pixel(x, y, *cleaned.get_pixel(min_x + x, min_y + y));
             }
         }
         Ok(resize_fill(&cropped, CANVAS_SIZE, CANVAS_SIZE)?)
     }
 }
 
-// ═══════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // Shadow
-// ═══════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 /// Shadow configuration for a layer element.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -681,9 +743,9 @@ impl Default for Shadow {
     fn default() -> Self { Self::new() }
 }
 
-// ═══════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // Background
-// ═══════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 /// Background fill for the icon canvas.
 #[derive(Debug, Clone)]
@@ -703,9 +765,9 @@ impl Background {
     pub fn image_tinted(path: impl Into<String>, tint: Color) -> Self { Self::Image { path: path.into(), tint: Some(tint) } }
 }
 
-// ═══════════════════════════════════════════════════════════════
-// LayerContent — what to draw
-// ═══════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// LayerContent â€” what to draw
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 /// The visual content of a layer.
 #[derive(Debug, Clone)]
@@ -730,9 +792,9 @@ impl LayerContent {
     pub fn text(content: impl Into<String>, font_size: f32) -> Self { Self::Text { content: content.into(), font_size } }
 }
 
-// ═══════════════════════════════════════════════════════════════
-// Layer — one element on the canvas
-// ═══════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// Layer â€” one element on the canvas
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 /// A single layer element placed on the icon canvas.
 #[derive(Debug, Clone)]
@@ -786,9 +848,9 @@ impl Layer {
     pub fn inner_shadow(mut self, s: Shadow) -> Self { self.inner_shadow = Some(s); self }
 }
 
-// ═══════════════════════════════════════════════════════════════
-// IconCanvas — main builder
-// ═══════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// IconCanvas â€” main builder
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 /// Builder for generating 1024x1024 icon PNGs.
 ///
@@ -831,6 +893,8 @@ pub struct IconCanvas {
     shade_opacity: f32,
     light_x: f32,
     light_y: f32,
+    corner_exponent: f32,
+    artwork_emboss: f32,
 }
 
 impl IconCanvas {
@@ -851,6 +915,8 @@ impl IconCanvas {
             shade_opacity: 0.0,
             light_x: -0.45,
             light_y: -0.89,
+            corner_exponent: APPLE_SQUIRCLE_EXPONENT,
+            artwork_emboss: 0.0,
         }
     }
 
@@ -866,9 +932,26 @@ impl IconCanvas {
     /// Apple Tahoe / iOS 26 squircle.
     pub fn corner_radius(mut self, r: f32) -> Self { self.corner_radius = r; self }
 
+    /// Set the corner-curve exponent. `2.0` gives a plain circular rounded
+    /// rect, [`APPLE_SQUIRCLE_EXPONENT`] (`5.0`) the Apple continuous
+    /// curvature squircle. The rim light, inner bevel, edge stroke and the
+    /// corner mask all follow the resulting curve.
+    pub fn squircle_exponent(mut self, n: f32) -> Self {
+        self.corner_exponent = n.clamp(2.0, 8.0);
+        self
+    }
+
+    /// Raised-relief emboss on the layer silhouettes (0.0-1.0). Lightens
+    /// glyph edges facing the light and darkens the opposite side so the
+    /// artwork reads as extruded from the tile.
+    pub fn artwork_emboss(mut self, strength: f32) -> Self {
+        self.artwork_emboss = strength.clamp(0.0, 1.0);
+        self
+    }
+
     /// Add a subtle highlight along the rounded-rect edge of the canvas.
     /// `width` is the highlight thickness in pixels (e.g. 4.0),
-    /// `opacity` controls its strength (0.0–1.0).
+    /// `opacity` controls its strength (0.0â€“1.0).
     /// Drawn as post-processing, so it never needs extra layers.
     pub fn edge_highlight(mut self, width: f32, opacity: f32) -> Self {
         self.edge_highlight_width = width.max(0.0);
@@ -878,14 +961,14 @@ impl IconCanvas {
 
     /// Frosted-glass overlay: washes the whole canvas toward white so
     /// colours look like they glow through frosted glass (iOS 26 style).
-    /// `opacity` 0.0–1.0 (e.g. 0.5 for a strong frost, 0.2 subtle).
+    /// `opacity` 0.0â€“1.0 (e.g. 0.5 for a strong frost, 0.2 subtle).
     pub fn frosted(mut self, opacity: f32) -> Self {
         self.frosted_opacity = opacity.clamp(0.0, 1.0);
         self
     }
 
     /// Inset depth along the rounded-rect edge (inner shadow that gives
-    /// the tile a 3D, beveled-glass look). `blur` in px, `opacity` 0.0–1.0.
+    /// the tile a 3D, beveled-glass look). `blur` in px, `opacity` 0.0â€“1.0.
     pub fn inner_depth(mut self, blur: f32, opacity: f32) -> Self {
         self.inner_depth_blur = blur.max(0.0);
         self.inner_depth_opacity = opacity.clamp(0.0, 1.0);
@@ -893,14 +976,14 @@ impl IconCanvas {
     }
 
     /// Glossy specular highlight: a bright sheen that fades from the top
-    /// edge downward, like light hitting the glass. `opacity` 0.0–1.0.
+    /// edge downward, like light hitting the glass. `opacity` 0.0â€“1.0.
     pub fn specular(mut self, opacity: f32) -> Self {
         self.specular_opacity = opacity.clamp(0.0, 1.0);
         self
     }
 
     /// Full-surface Liquid Glass gloss: soft white gradient over the top
-    /// ~45% plus a diagonal sheen band (Apple iOS 26 style). 0.0–1.0.
+    /// ~45% plus a diagonal sheen band (Apple iOS 26 style). 0.0â€“1.0.
     pub fn gloss(mut self, opacity: f32) -> Self {
         self.gloss_opacity = opacity.clamp(0.0, 1.0);
         self
@@ -912,7 +995,7 @@ impl IconCanvas {
         self
     }
 
-    /// Bottom inner shade that grounds the icon. 0.0–1.0.
+    /// Bottom inner shade that grounds the icon. 0.0â€“1.0.
     pub fn shade(mut self, opacity: f32) -> Self {
         self.shade_opacity = opacity.clamp(0.0, 1.0);
         self
@@ -931,19 +1014,21 @@ impl IconCanvas {
     /// gloss / vibrancy / specular / inner-depth / edge-highlight / shade.
     pub fn glass(mut self) -> Self {
         self.corner_radius = APPLE_CORNER_RADIUS;
+        self.corner_exponent = APPLE_SQUIRCLE_EXPONENT;
         self.frosted_opacity = 0.08;
-        self.specular_opacity = 0.50;
-        self.inner_depth_blur = 52.0;
-        self.inner_depth_opacity = 0.38;
+        self.specular_opacity = 0.55;
+        self.inner_depth_blur = 64.0;
+        self.inner_depth_opacity = 0.42;
         self.edge_highlight_width = 3.0;
-        self.edge_highlight_opacity = 0.60;
-        self.gloss_opacity = 0.24;
-        self.vibrancy = 0.18;
-        self.shade_opacity = 0.20;
+        self.edge_highlight_opacity = 0.62;
+        self.gloss_opacity = 0.20;
+        self.vibrancy = 0.24;
+        self.shade_opacity = 0.24;
+        self.artwork_emboss = 0.55;
         self
     }
 
-    /// Add a layer (drawn in order — last = on top).
+    /// Add a layer (drawn in order â€” last = on top).
     pub fn layer(mut self, layer: Layer) -> Self { self.layers.push(layer); self }
 
     /// Generate the icon and save as PNG.
@@ -977,9 +1062,9 @@ impl IconCanvas {
         Some(img)
     }
 
-    // ═══════════════════════════════════════════════════════════════
-    // Image processing core — recolor / background swap / depth effects
-    // ═══════════════════════════════════════════════════════════════
+    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // Image processing core â€” recolor / background swap / depth effects
+    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
     /// Load an image file and run [`ProcessOptions`] on it.
     ///
@@ -990,6 +1075,10 @@ impl IconCanvas {
         options: &ProcessOptions,
     ) -> Result<RgbaImage, Box<dyn std::error::Error>> {
         let src = load_rgba(input_path)?;
+        // Despeckle + prefilter at source resolution, before the upscale
+        // spreads staircase aliasing and grain into ringing blobs.
+        let mut src = Self::despeckle(&src, GRAIN_CEILING);
+        src = Self::binomial_blur(&src, Self::prefilter_radius(src.width(), CANVAS_SIZE));
         let src = resize_fit(&src, CANVAS_SIZE, CANVAS_SIZE);
         Ok(Self::process_image(&src, options))
     }
@@ -1000,10 +1089,10 @@ impl IconCanvas {
     /// Pipeline order:
     /// 1. Background replacement (flood fill + fringe decontamination)
     /// 2. Recolor ([`RecolorOptions`])
-    /// 3. Dual outer shadow -> artwork shadow -> content -> vibrancy ->
-    ///    gloss + sheen -> specular -> inner depth -> bottom shade ->
+    /// 3. Dual outer shadow -> artwork shadow -> content -> artwork emboss
+    ///    -> vibrancy -> gloss -> specular -> inner depth -> bottom shade ->
     ///    gradient edge stroke
-    /// 4. Anti-aliased corner radius mask
+    /// 4. Anti-aliased squircle corner mask
     pub fn process_image(src: &RgbaImage, options: &ProcessOptions) -> RgbaImage {
         let mut work = src.clone();
 
@@ -1054,15 +1143,47 @@ impl IconCanvas {
             }
         }
 
-        // 1b. Artwork shadow: the foreground (inverse of the border flood
-        // mask) casts a soft shadow onto the background, so glyphs lift
-        // off like Apple icons. Painted under the content.
-        if let Some(art) = &d.artwork_shadow {
-            let bg = Self::background_mask(&work);
-            let mut silhouette = RgbaImage::from_pixel(work.width(), work.height(), Rgba([0, 0, 0, 0]));
-            for (px, py, pixel) in work.enumerate_pixels() {
-                if pixel[3] > 10 && !bg[py as usize * work.width() as usize + px as usize] {
-                    silhouette.put_pixel(px, py, Rgba([255, 255, 255, 255]));
+        // Artwork silhouette, shared by the glyph drop shadow and the raised
+        // relief emboss. Derived from the border flood mask, then smoothed:
+        // the raw mask is ragged on anti-aliased diagonals, and a ragged
+        // silhouette turns into speckle chains once a distance transform
+        // blurs it.
+        let (sw, sh) = (work.width() as usize, work.height() as usize);
+        let silhouette_mask: Option<Vec<bool>> =
+            if d.artwork_shadow.is_some() || d.artwork_emboss > 0.0 {
+                let bg = Self::background_mask(&work);
+                let mut fg = vec![false; sw * sh];
+                for (i, pixel) in work.pixels().enumerate() {
+                    if pixel[3] > 10 && !bg[i] { fg[i] = true; }
+                }
+                Some(Self::smooth_mask(&fg, sw, sh))
+            } else {
+                None
+            };
+
+        // 1b. Artwork shadow: the foreground silhouette casts a soft shadow
+        // onto the background, so glyphs lift off like Apple icons. Painted
+        // under the content.
+        if let (Some(art), Some(mask)) = (&d.artwork_shadow, silhouette_mask.as_ref()) {
+            // Round the silhouette boundary before the distance transform.
+            // The flood mask is binary and its diagonal edges are a
+            // staircase, so every step becomes a parallel ridge in the
+            // shadow - the combed streaks under a glyph. Blurring the mask
+            // and re-thresholding convolves the boundary with a disc, which
+            // turns the staircase back into a curve.
+            let mut mask_img =
+                RgbaImage::from_pixel(sw as u32, sh as u32, Rgba([0, 0, 0, 0]));
+            for (i, on) in mask.iter().enumerate() {
+                if *on {
+                    mask_img.put_pixel((i % sw) as u32, (i / sw) as u32, Rgba([255, 255, 255, 255]));
+                }
+            }
+            let rounded = Self::binomial_blur(&mask_img, 3);
+            let mut silhouette =
+                RgbaImage::from_pixel(sw as u32, sh as u32, Rgba([0, 0, 0, 0]));
+            for (i, p) in rounded.pixels().enumerate() {
+                if p[3] >= 128 {
+                    silhouette.put_pixel((i % sw) as u32, (i / sw) as u32, Rgba([255, 255, 255, 255]));
                 }
             }
             let color = Color::new(art.color.r, art.color.g, art.color.b, art.opacity);
@@ -1083,7 +1204,33 @@ impl IconCanvas {
             }
         }
 
-        // 3./4. Glass effects + corner mask.
+        // 2b. Raised relief: bevel the artwork edges toward / away from the
+        // light so the glyphs read as extruded from the tile. Runs before
+        // the tile-wide glass pass so the bevel stays crisp and the glass
+        // only shades the surface as a whole.
+        if d.artwork_emboss > 0.0 {
+            if let Some(mask) = silhouette_mask.as_ref() {
+                let (cw, ch) = (CANVAS_SIZE as usize, CANVAS_SIZE as usize);
+                // Place the silhouette mask into canvas coordinates.
+                let mut placed = vec![false; cw * ch];
+                for y in 0..sh {
+                    for x in 0..sw {
+                        let cx = ox + x as i64;
+                        let cy = oy + y as i64;
+                        if cx < 0 || cy < 0 || cx >= cw as i64 || cy >= ch as i64 { continue; }
+                        placed[cy as usize * cw + cx as usize] = mask[y * sw + x];
+                    }
+                }
+                Self::apply_artwork_emboss(
+                    &mut canvas, &placed, cw, ch,
+                    d.light_x, d.light_y,
+                    CANVAS_SIZE as f32 * 0.038,
+                    d.artwork_emboss,
+                );
+            }
+        }
+
+        // 3./4. Glass effects + squircle corner mask.
         Self::apply_depth_effects(&mut canvas, d);
 
         canvas
@@ -1107,7 +1254,7 @@ impl IconCanvas {
         )
     }
 
-    // ── Processing internals ──────────────────────────────────
+    // â”€â”€ Processing internals â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Flood-fill the border-connected background and repaint it `target`.
     ///
@@ -1184,25 +1331,36 @@ impl IconCanvas {
             );
             // Decontaminate fringe: blends of artwork over the OLD background
             // become the same blend over the NEW background.
-            let bg_centroid = Self::closest_palette_centroid(&palette, c, 0.55);
-            if near_bg(px as usize, py as usize) {
-                if let Some((rr, rg, rb)) = bg_centroid {
-                    if let Some(fg) = nearest_kept(px as usize, py as usize) {
-                        let fr = (fg.0 - rr, fg.1 - rg, fg.2 - rb);
-                        let denom = fr.0 * fr.0 + fr.1 * fr.1 + fr.2 * fr.2;
-                        let alpha = if denom < 0.0001 {
-                            0.0
-                        } else {
-                            (((c.0 - rr) * fr.0 + (c.1 - rg) * fr.1 + (c.2 - rb) * fr.2) / denom)
-                                .clamp(0.0, 1.0)
-                        };
-                        out.put_pixel(px, py, Rgba([
-                            ((fg.0 * alpha + tr * (1.0 - alpha)) * 255.0).round().clamp(0.0, 255.0) as u8,
-                            ((fg.1 * alpha + tg * (1.0 - alpha)) * 255.0).round().clamp(0.0, 255.0) as u8,
-                            ((fg.2 * alpha + tb * (1.0 - alpha)) * 255.0).round().clamp(0.0, 255.0) as u8,
-                            a,
-                        ]));
-                        continue;
+            //
+            // Only semi-transparent pixels qualify. A fully opaque pixel
+            // cannot be a blend of artwork and the old background, so
+            // running the unmix on it is pure damage: `nearest_kept`
+            // returns whichever neighbor the ring scan hits first, and on
+            // a glyph edge that varies per pixel, so opaque edge texels
+            // get pulled toward an unrelated neighbor color. That is what
+            // produced the dotted speckle chains along every silhouette in
+            // dark mode.
+            if a < 250 {
+                let bg_centroid = Self::closest_palette_centroid(&palette, c, 0.55);
+                if near_bg(px as usize, py as usize) {
+                    if let Some((rr, rg, rb)) = bg_centroid {
+                        if let Some(fg) = nearest_kept(px as usize, py as usize) {
+                            let fr = (fg.0 - rr, fg.1 - rg, fg.2 - rb);
+                            let denom = fr.0 * fr.0 + fr.1 * fr.1 + fr.2 * fr.2;
+                            let alpha = if denom < 0.0001 {
+                                0.0
+                            } else {
+                                (((c.0 - rr) * fr.0 + (c.1 - rg) * fr.1 + (c.2 - rb) * fr.2) / denom)
+                                    .clamp(0.0, 1.0)
+                            };
+                            out.put_pixel(px, py, Rgba([
+                                ((fg.0 * alpha + tr * (1.0 - alpha)) * 255.0).round().clamp(0.0, 255.0) as u8,
+                                ((fg.1 * alpha + tg * (1.0 - alpha)) * 255.0).round().clamp(0.0, 255.0) as u8,
+                                ((fg.2 * alpha + tb * (1.0 - alpha)) * 255.0).round().clamp(0.0, 255.0) as u8,
+                                a,
+                            ]));
+                            continue;
+                        }
                     }
                 }
             }
@@ -1616,9 +1774,16 @@ impl IconCanvas {
                 out.put_pixel(px, py, *pixel);
                 continue;
             }
-            let r = pixel[0] as f32 / 255.0;
-            let g = pixel[1] as f32 / 255.0;
-            let b = pixel[2] as f32 / 255.0;
+            // Straight (un-premultiplied) color. A semi-transparent pixel
+            // stores the artwork color, not the artwork already blended with
+            // whatever sits behind it. Recoloring the raw stored value reads
+            // the fringe as a washed-out mid tone, which after tinting shows
+            // up as a halo of the old hue around every glyph. Undo the
+            // alpha, recolor, then re-apply it on the way out.
+            let inv = 1.0 / a;
+            let r = (pixel[0] as f32 / 255.0 * inv).min(1.0);
+            let g = (pixel[1] as f32 / 255.0 * inv).min(1.0);
+            let b = (pixel[2] as f32 / 255.0 * inv).min(1.0);
 
             if let (Some(from), Some(to)) = (o.remap_from, o.remap_to) {
                 let d = ((r - from.r).powi(2) + (g - from.g).powi(2) + (b - from.b).powi(2)).sqrt();
@@ -1660,8 +1825,33 @@ impl IconCanvas {
                 }
                 RecolorMode::Shaded => {
                     let (_, _, l) = Self::rgb_to_hsl(r, g, b);
+                    // Normalize against the tint's own lightness so the
+                    // brightest artwork maps to the full tint.
                     let k = if tgt_l <= 0.001 { l } else { (l / tgt_l).min(1.0) };
-                    (o.tint.r * k, o.tint.g * k, o.tint.b * k)
+                    // Gentle lift: without it the mid tones collapse and
+                    // the recolored art loses its internal shape.
+                    let k = k.powf(0.82);
+                    // Shadow floor. A plain `tint * k` multiply drives
+                    // shadows to black and kills the hue; keeping them at
+                    // a fraction of the tint is what makes Apple recolored
+                    // artwork read as one material instead of a stencil.
+                    const SHADOW_FLOOR: f32 = 0.46;
+                    let scale = SHADOW_FLOOR + (1.0 - SHADOW_FLOOR) * k;
+                    // Highlight roll-off toward white, so the brightest
+                    // planes get a specular lift instead of clipping flat
+                    // at the tint value.
+                    let hi_raw = ((l - 0.82) / 0.18).clamp(0.0, 1.0);
+                    let hi = hi_raw * hi_raw * (3.0 - 2.0 * hi_raw) * 0.24;
+                    let base = (
+                        o.tint.r * scale,
+                        o.tint.g * scale,
+                        o.tint.b * scale,
+                    );
+                    (
+                        base.0 + (1.0 - base.0) * hi,
+                        base.1 + (1.0 - base.1) * hi,
+                        base.2 + (1.0 - base.2) * hi,
+                    )
                 }
                 RecolorMode::Colorize => {
                     let (_, s, l) = Self::rgb_to_hsl(r, g, b);
@@ -1681,18 +1871,366 @@ impl IconCanvas {
             let fb = b + (nb - b) * intensity;
 
             out.put_pixel(px, py, Rgba([
-                (fr * 255.0).round().clamp(0.0, 255.0) as u8,
-                (fg * 255.0).round().clamp(0.0, 255.0) as u8,
-                (fb * 255.0).round().clamp(0.0, 255.0) as u8,
+                (fr * a * 255.0).round().clamp(0.0, 255.0) as u8,
+                (fg * a * 255.0).round().clamp(0.0, 255.0) as u8,
+                (fb * a * 255.0).round().clamp(0.0, 255.0) as u8,
                 pixel[3],
             ]));
         }
         out
     }
 
+    /// Prefilter radius for an upscale from `from` to `to` pixels.
+    ///
+    /// Half the upscale factor is the textbook reconstruction cutoff. It is
+    /// clamped to `0..=3`: below 2x there is no staircase left to suppress,
+    /// and beyond 3x the source is too small for the artwork to carry any
+    /// real detail anyway, so a wider kernel would only soften the result.
+    fn prefilter_radius(from: u32, to: u32) -> usize {
+        if from == 0 || to <= from { return 0; }
+        let scale = to as f32 / from as f32;
+        ((scale * 0.5).round() as usize).clamp(0, 3)
+    }
+
+    /// Binomial (Gaussian-approximating) blur with the given radius.
+    ///
+    /// Separable, so O(n * radius). Operates on straight alpha: fully
+    /// opaque pixels are filtered normally, semi-transparent ones are
+    /// weighted by their alpha coverage so the silhouette and its
+    /// anti-aliasing survive.
+    fn binomial_blur(src: &RgbaImage, radius: usize) -> RgbaImage {
+        if radius == 0 { return src.clone(); }
+        let w = src.width() as usize;
+        let h = src.height() as usize;
+        // Repeated (1 2 1) / 4 passes give 1 4 6 4 1 at radius 2.
+        let mut kernel = vec![1.0f32];
+        for _ in 0..radius {
+            let mut next = Vec::with_capacity(kernel.len() + 2);
+            next.push(kernel[0]);
+            for k in &kernel { next.push(2.0 * k); }
+            next.push(*kernel.last().unwrap());
+            kernel = next;
+        }
+        let total: f32 = kernel.iter().sum();
+        for k in kernel.iter_mut() { *k /= total; }
+        let off = radius as isize;
+
+        // Horizontal pass into a premultiplied float buffer.
+        let mut tmp = vec![[0.0f32; 4]; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                let mut acc = [0.0f32; 4];
+                for (i, kw) in kernel.iter().enumerate() {
+                    let sx = (x as isize + i as isize - off).clamp(0, w as isize - 1) as u32;
+                    let p = src.get_pixel(sx, y as u32);
+                    let a = p[3] as f32 / 255.0;
+                    acc[0] += p[0] as f32 / 255.0 * a * kw;
+                    acc[1] += p[1] as f32 / 255.0 * a * kw;
+                    acc[2] += p[2] as f32 / 255.0 * a * kw;
+                    acc[3] += a * kw;
+                }
+                tmp[y * w + x] = acc;
+            }
+        }
+        // Vertical pass, un-premultiplying on the way out.
+        let mut out = RgbaImage::from_pixel(w as u32, h as u32, Rgba([0, 0, 0, 0]));
+        for y in 0..h {
+            for x in 0..w {
+                let mut acc = [0.0f32; 4];
+                for (i, kw) in kernel.iter().enumerate() {
+                    let sy = (y as isize + i as isize - off).clamp(0, h as isize - 1) as usize;
+                    let t = tmp[sy * w + x];
+                    acc[0] += t[0] * kw;
+                    acc[1] += t[1] * kw;
+                    acc[2] += t[2] * kw;
+                    acc[3] += t[3] * kw;
+                }
+                let inv = if acc[3] > 0.0001 { 1.0 / acc[3] } else { 0.0 };
+                out.put_pixel(x as u32, y as u32, Rgba([
+                    (acc[0] * inv * 255.0).round().clamp(0.0, 255.0) as u8,
+                    (acc[1] * inv * 255.0).round().clamp(0.0, 255.0) as u8,
+                    (acc[2] * inv * 255.0).round().clamp(0.0, 255.0) as u8,
+                    (acc[3] * 255.0).round().clamp(0.0, 255.0) as u8,
+                ]));
+            }
+        }
+        out
+    }
+
+    /// Remove compression grain from the artwork.
+    ///
+    /// Low-resolution sources (a 225px logo) carry blocky single-color
+    /// grain one to three pixels wide along hard edges, and it is chroma
+    /// noise, so it survives as pastel dots on light backgrounds and as
+    /// darker mottling on saturated ones. `apply_vibrancy` then boosts
+    /// saturation and contrast on top of it and turns that grain into a
+    /// visible dotted chain along every glyph edge.
+    ///
+    /// This has to run on the *source* resolution. Upscaling first spreads
+    /// every grain pixel into a five-pixel block, and no median window that
+    /// is still small enough to preserve real detail can remove a
+    /// five-pixel blob afterwards.
+    ///
+    /// A `5x5` median is the right tool: it removes isolated blobs while
+    /// leaving any structure wider than the window untouched. To keep real
+    /// detail safe, a pixel is only replaced when it deviates from the
+    /// local median by at most `noise_ceiling` - genuine edges and thin
+    /// lines deviate far more than grain does, so they are left alone.
+    ///
+    /// Only fully opaque pixels take part, and the median is built from
+    /// opaque neighbors alone, so the anti-aliased silhouette fringe is
+    /// never sampled and never rewritten.
+    fn despeckle(src: &RgbaImage, noise_ceiling: f32) -> RgbaImage {
+        const R: usize = 2;
+        const WIN: usize = (2 * R + 1) * (2 * R + 1);
+        /// Minimum opaque samples in the window (of 25).
+        const MIN_SAMPLES: usize = 13;
+        let w = src.width() as usize;
+        let h = src.height() as usize;
+        if w < 2 * R + 1 || h < 2 * R + 1 { return src.clone(); }
+        let mut out = src.clone();
+        let mut cols = [[0u8; WIN]; 3];
+        for y in R..h - R {
+            for x in R..w - R {
+                let p = *src.get_pixel(x as u32, y as u32);
+                if p[3] < 250 { continue; }
+                let mut n = 0usize;
+                for dy in 0..=2 * R {
+                    for dx in 0..=2 * R {
+                        let q = *src.get_pixel((x - R + dx) as u32, (y - R + dy) as u32);
+                        if q[3] < 250 { continue; }
+                        cols[0][n] = q[0];
+                        cols[1][n] = q[1];
+                        cols[2][n] = q[2];
+                        n += 1;
+                    }
+                }
+                if n < MIN_SAMPLES { continue; }
+                let mut med = [0u8; 3];
+                for c in 0..3 {
+                    cols[c][..n].sort_unstable();
+                    med[c] = cols[c][n / 2];
+                }
+                let dev = (p[0] as i32 - med[0] as i32).abs()
+                    .max((p[1] as i32 - med[1] as i32).abs())
+                    .max((p[2] as i32 - med[2] as i32).abs()) as f32
+                    / 255.0;
+                if dev <= 0.006 || dev > noise_ceiling { continue; }
+                out.put_pixel(x as u32, y as u32, Rgba([med[0], med[1], med[2], p[3]]));
+            }
+        }
+        out
+    }
+
+    /// Squircle (superellipse) signed distance field and outward normal.
+    ///
+    /// The corner is a superellipse `|u|^n + |v|^n = 1` in the `r x r`
+    /// corner box, blended into straight edges. `n = 2.0` reproduces the
+    /// plain circular corner exactly (quarter circle of radius `r`), so
+    /// callers that want the old silhouette can ask for `2.0`. `n = 5.0`
+    /// is the Apple shape: the curvature grows continuously out of the
+    /// straight edge instead of stepping to `1 / r` at the tangent point,
+    /// which is what makes the tile read as a squircle and not a rounded
+    /// rectangle.
+    ///
+    /// Returns `(distance, normal)`. `distance` is negative inside the
+    /// shape and is a true Euclidean distance in pixels, so band-limited
+    /// effects (rim light, inner bevel, edge stroke, corner mask) can use
+    /// it directly.
+    fn squircle_sdf_normal(
+        px: f32, py: f32, w: f32, h: f32, r: f32, n: f32,
+    ) -> (f32, [f32; 2]) {
+        let half_w = w / 2.0;
+        let half_h = h / 2.0;
+        let r = r.min(half_w).min(half_h).max(0.0);
+        let n = n.clamp(2.0, 8.0);
+        let x = px - half_w;
+        let y = py - half_h;
+        let ax = x.abs();
+        let ay = y.abs();
+        // How far past the straight-edge zone we are on each axis. Negative
+        // means the pixel is still inside the flat part of that axis.
+        let qx = ax - (half_w - r);
+        let qy = ay - (half_h - r);
+
+        // Only the corner box needs the curve. Clamping to zero is what makes
+        // the field fall back to the straight edges: a pixel past the flat
+        // zone on x but still inside it on y must measure to the x edge, not
+        // be treated as if it were out in the corner.
+        let u = qx.max(0.0) / r;
+        let v = qy.max(0.0) / r;
+        let s = u.powf(n) + v.powf(n);
+
+        // Straight-edge region: both offsets zero, so the superellipse
+        // gradient vanishes. Measure to the nearest of the four edges.
+        if s < 1.0e-6 {
+            let (d, nvec) = if qx < qy {
+                (qx - r, [if x < 0.0 { -1.0 } else { 1.0 }, 0.0])
+            } else {
+                (qy - r, [0.0, if y < 0.0 { -1.0 } else { 1.0 }])
+            };
+            return (d, nvec);
+        }
+
+        // f = s^(1/n) - 1, gradient of f wrt (u, v).
+        let f = s.powf(1.0 / n) - 1.0;
+        let k = s.powf(1.0 / n - 1.0);
+        let gu = k * u.powf(n - 1.0);
+        let gv = k * v.powf(n - 1.0);
+        let glen = (gu * gu + gv * gv).sqrt().max(1.0e-6);
+        // Pixel-space gradient carries the 1 / r of the normalization, so
+        // dividing by it turns the implicit offset into a distance.
+        let d = f * r / glen;
+        (
+            d,
+            [
+                gu / glen * if x < 0.0 { -1.0 } else { 1.0 },
+                gv / glen * if y < 0.0 { -1.0 } else { 1.0 },
+            ],
+        )
+    }
+
+    /// Smooth a binary mask so a distance transform over it produces clean
+    /// shadows and bevels.
+    ///
+    /// Two morphological passes: isolated single pixels are dropped (they
+    /// become a dotted shadow) and one-pixel holes are filled (they punch
+    /// holes into the shadow). The flood mask that separates artwork from
+    /// background is inherently ragged on anti-aliased diagonals, and a
+    /// ragged silhouette is exactly what produces the speckle chains along
+    /// glyph edges. O(n) per pass.
+    fn smooth_mask(mask: &[bool], w: usize, h: usize) -> Vec<bool> {
+        let mut cur = mask.to_vec();
+        for _ in 0..2 {
+            let mut next = cur.clone();
+            for y in 0..h {
+                for x in 0..w {
+                    let i = y * w + x;
+                    if x == 0 || y == 0 || x + 1 >= w || y + 1 >= h { continue; }
+                    let mut on = 0u8;
+                    for (dx, dy) in [(-1i64, 0i64), (1, 0), (0, -1), (0, 1),
+                                      (-1, -1), (1, -1), (-1, 1), (1, 1)] {
+                        let ni = (y as i64 + dy) as usize * w + (x as i64 + dx) as usize;
+                        if cur[ni] { on += 1; }
+                    }
+                    // Erode lone pixels, dilate lone holes.
+                    if cur[i] && on <= 2 { next[i] = false; }
+                    else if !cur[i] && on >= 6 { next[i] = true; }
+                }
+            }
+            cur = next;
+        }
+        cur
+    }
+
+    /// Chamfer distance transform from a set of seed cells, in pixels.
+    fn chamfer_distance(seeds: &[bool], w: usize, h: usize) -> Vec<f32> {
+        const INF: f32 = 1.0e9;
+        let mut dist = vec![INF; w * h];
+        for (i, s) in seeds.iter().enumerate() {
+            if *s { dist[i] = 0.0; }
+        }
+        let (d1, d2) = (1.0f32, std::f32::consts::SQRT_2);
+        for y in 0..h {
+            for x in 0..w {
+                let i = y * w + x;
+                let mut v = dist[i];
+                if x > 0 { v = v.min(dist[i - 1] + d1); }
+                if y > 0 {
+                    v = v.min(dist[i - w] + d1);
+                    if x > 0 { v = v.min(dist[i - w - 1] + d2); }
+                    if x + 1 < w { v = v.min(dist[i - w + 1] + d2); }
+                }
+                dist[i] = v;
+            }
+        }
+        for y in (0..h).rev() {
+            for x in (0..w).rev() {
+                let i = y * w + x;
+                let mut v = dist[i];
+                if x + 1 < w { v = v.min(dist[i + 1] + d1); }
+                if y + 1 < h {
+                    v = v.min(dist[i + w] + d1);
+                    if x + 1 < w { v = v.min(dist[i + w + 1] + d2); }
+                    if x > 0 { v = v.min(dist[i + w - 1] + d2); }
+                }
+                dist[i] = v;
+            }
+        }
+        dist
+    }
+
+    /// Signed distance field of a binary mask: positive inside, negative
+    /// outside, in pixels. Used for the raised-relief emboss, where the
+    /// gradient of the field gives the surface normal of the glyph edge.
+    fn signed_distance_field(mask: &[bool], w: usize, h: usize) -> Vec<f32> {
+        let inside: Vec<bool> = mask.to_vec();
+        let outside: Vec<bool> = mask.iter().map(|m| !m).collect();
+        let d_shape = Self::chamfer_distance(&inside, w, h);
+        let d_edge = Self::chamfer_distance(&outside, w, h);
+        d_shape.iter().zip(d_edge.iter()).map(|(a, b)| a - b).collect()
+    }
+
+    /// Raised-relief emboss over the artwork silhouette.
+    ///
+    /// Glyph edges that face the light get a soft white lift, the opposite
+    /// edges a soft dark bevel, both fading out over `bevel` pixels into
+    /// the interior. That is the difference between artwork that looks
+    /// printed on the tile and artwork that looks extruded from it. The
+    /// depth ramp is driven by the signed distance field, so it follows the
+    /// real silhouette (including concave notches) instead of a blur.
+    fn apply_artwork_emboss(
+        img: &mut RgbaImage,
+        mask: &[bool],
+        w: usize,
+        h: usize,
+        light_x: f32, light_y: f32,
+        bevel: f32,
+        strength: f32,
+    ) {
+        if strength <= 0.001 || bevel <= 0.0 { return; }
+        let sdf = Self::signed_distance_field(mask, w, h);
+        // Wide stencil: the field steps by ~1px across the edge, so a
+        // 1px central difference is pure noise there.
+        const STEP: usize = 3;
+        let at = |x: usize, y: usize| -> f32 {
+            sdf[y.min(h - 1) * w + x.min(w - 1)]
+        };
+        for y in 0..h {
+            for x in 0..w {
+                let i = y * w + x;
+                let d = sdf[i];
+                // Only the interior band right behind the silhouette edge.
+                if d <= 0.0 || d >= bevel { continue; }
+                if img.get_pixel(x as u32, y as u32)[3] < 8 { continue; }
+                let gx = at(x + STEP, y) - at(x.saturating_sub(STEP), y);
+                let gy = at(x, y + STEP) - at(x, y.saturating_sub(STEP));
+                let glen = (gx * gx + gy * gy).sqrt();
+                if glen < 1.0e-4 { continue; }
+                // Outward normal: gradient of a field that grows inside.
+                let nx = -gx / glen;
+                let ny = -gy / glen;
+                let facing = (nx * light_x + ny * light_y).clamp(-1.0, 1.0);
+                let t = 1.0 - d / bevel;
+                let ramp = t * t * (3.0 - 2.0 * t);
+                let lit = ramp * facing.max(0.0) * strength * 0.46;
+                let dark = ramp * (-facing).max(0.0) * strength * 0.42;
+                if lit >= dark {
+                    if lit < 0.004 { continue; }
+                    Self::blend_pixel(img, x as u32, y as u32,
+                        Rgba([255, 255, 255, (lit * 255.0).round() as u8]));
+                } else {
+                    if dark < 0.004 { continue; }
+                    Self::blend_pixel(img, x as u32, y as u32,
+                        Rgba([0, 0, 0, (dark * 255.0).round() as u8]));
+                }
+            }
+        }
+    }
+
     /// Glyph-shaped drop shadow: chamfer distance transform over the content
     /// silhouette (already placed at its final position), then a smoothstep
-    /// falloff. O(n) regardless of blur radius — the previous stamp-blur was
+    /// falloff. O(n) regardless of blur radius â€” the previous stamp-blur was
     /// O(n * blur^2).
     fn paint_distance_shadow(
         canvas: &mut RgbaImage,
@@ -1746,6 +2284,16 @@ impl IconCanvas {
             }
         }
 
+        // The chamfer transform only knows two step lengths (1 and sqrt 2), so
+        // its field has visible ridges along the diagonals - the "combed"
+        // streaks that appear in a large soft shadow. Scale the smoothing to
+        // the blur so a soft shadow gets a smooth field while a tight one
+        // keeps its shape.
+        Self::smooth_scalar_field(
+            &mut dist, w, h,
+            ((blur * 0.10).round() as usize).clamp(2, 5),
+        );
+
         for y in 0..h {
             for x in 0..w {
                 let dd = dist[y * w + x];
@@ -1763,13 +2311,56 @@ impl IconCanvas {
         }
     }
 
+    /// Smooth a scalar field with three box passes (approximates a Gaussian).
+    ///
+    /// Used to take the directional ridges out of an approximate distance
+    /// transform before it is turned into a shadow falloff. A running sum
+    /// keeps each pass O(n) regardless of the radius, which matters because
+    /// the field is one entry per canvas pixel.
+    fn smooth_scalar_field(field: &mut [f32], w: usize, h: usize, radius: usize) {
+        if radius == 0 || w < 3 || h < 3 { return; }
+        let mut tmp = vec![0.0f32; w * h];
+        let rx = radius.min(w - 1);
+        let ry = radius.min(h - 1);
+        for _ in 0..3 {
+            for y in 0..h {
+                let row = y * w;
+                let mut sum = 0.0f32;
+                for x in 0..=rx {
+                    sum += field[row + x];
+                }
+                let norm = 1.0 / (2 * radius + 1) as f32;
+                for x in 0..w {
+                    let add = (x + radius + 1).min(w - 1);
+                    let sub = (x as isize - radius as isize).max(0) as usize;
+                    sum += field[row + add] - field[row + sub];
+                    tmp[row + x] = sum * norm;
+                }
+            }
+            for x in 0..w {
+                let mut sum = 0.0f32;
+                for y in 0..=ry {
+                    sum += tmp[y * w + x];
+                }
+                let norm = 1.0 / (2 * radius + 1) as f32;
+                for y in 0..h {
+                    let add = (y + radius + 1).min(h - 1);
+                    let sub = (y as isize - radius as isize).max(0) as usize;
+                    sum += tmp[add * w + x] - tmp[sub * w + x];
+                    field[y * w + x] = sum * norm;
+                }
+            }
+        }
+    }
+
     /// Specular rim + inner depth + edge highlight + corner mask, all steered
     /// Apple Liquid Glass finish, steered by one light direction.
     ///
-    /// Order: vibrancy -> specular rim -> top gloss + diagonal sheen ->
-    /// inner depth -> bottom shade -> gradient edge stroke -> AA corner mask.
-    /// The specular band uses the rounded-rect surface normal (rim lighting),
-    /// so the sheen wraps around corners like real glass.
+    /// Order: vibrancy -> specular rim -> top gloss -> inner depth ->
+    /// bottom shade -> gradient edge stroke -> AA corner mask. Every band
+    /// is driven by [`Self::squircle_sdf_normal`], so the rim light, bevel,
+    /// edge stroke and mask all follow the Apple squircle silhouette
+    /// instead of a circular rounded rect.
     fn apply_depth_effects(img: &mut RgbaImage, d: &DepthOptions) {
         // Vibrancy works without a rounded rect (e.g. corner 0 builders).
         if d.vibrancy > 0.001 {
@@ -1778,15 +2369,18 @@ impl IconCanvas {
         if d.corner_radius <= 0.0 { return; }
         let size = CANVAS_SIZE as f32;
         let r = d.corner_radius.min(size / 2.0);
+        let n = d.corner_exponent;
         let band = size * 0.035;
+        let sdf_at = |x: u32, y: u32| {
+            Self::squircle_sdf_normal(x as f32 + 0.5, y as f32 + 0.5, size, size, r, n)
+        };
 
         if d.specular_opacity > 0.0 {
             for py in 0..CANVAS_SIZE {
                 for px in 0..CANVAS_SIZE {
-                    let (sdf, n) =
-                        Self::rounded_rect_sdf_normal(px as f32 + 0.5, py as f32 + 0.5, size, size, r);
+                    let (sdf, nv) = sdf_at(px, py);
                     if sdf >= 0.0 || -sdf > band { continue; }
-                    let rim = (n[0] * d.light_x + n[1] * d.light_y).max(0.0);
+                    let rim = (nv[0] * d.light_x + nv[1] * d.light_y).max(0.0);
                     if rim <= 0.001 { continue; }
                     let edge_t = 1.0 + sdf / band;
                     let a = edge_t * edge_t * rim * d.specular_opacity;
@@ -1796,31 +2390,31 @@ impl IconCanvas {
             }
         }
 
-        // Full-surface Liquid Glass gloss: soft top gradient + diagonal sheen.
+        // Full-surface Liquid Glass gloss. Broad and smooth on purpose: the
+        // previous narrow diagonal sheen band read as a scratch across the
+        // artwork, so the highlight is now a wide vertical falloff plus one
+        // soft off-center lobe.
         if d.gloss_opacity > 0.001 {
             let g = d.gloss_opacity;
             for py in 0..CANVAS_SIZE {
                 let v = py as f32 / size;
-                // Top gradient covering ~45%, quadratic falloff.
-                let top_t = (1.0 - v / 0.45).clamp(0.0, 1.0);
-                let top_a = top_t * top_t * g;
+                let top_t = (1.0 - v / 0.52).clamp(0.0, 1.0);
+                let vertical = top_t * top_t * (3.0 - 2.0 * top_t);
+                let row_a = vertical * g;
+                // Wide reflection lobe anchored toward the light side.
+                let lobe_ey = (v - 0.02) / 0.44;
                 for px in 0..CANVAS_SIZE {
-                    let (sdf, _) =
-                        Self::rounded_rect_sdf_normal(px as f32 + 0.5, py as f32 + 0.5, size, size, r);
-                    if sdf >= 0.5 { continue; }
-                    let pixel = img.get_pixel(px, py);
-                    if pixel[3] < 10 { continue; }
+                    let (sdf, _) = sdf_at(px, py);
+                    if sdf >= 0.0 { continue; }
+                    if img.get_pixel(px, py)[3] < 10 { continue; }
                     let u = px as f32 / size;
-                    // Slightly stronger toward the light side.
-                    let light_side = 1.0 - ((u - 0.5) - d.light_x * 0.18).abs() * 0.55;
-                    let mut a = top_a * light_side.clamp(0.55, 1.0);
-                    // Diagonal sheen band (glass reflection streak).
-                    let diag = (u + v - 0.62) / 0.20;
-                    let sheen = (-diag * diag).exp() * g * 0.38;
-                    a += sheen;
-                    // Fade gloss right at the rounded edge so the stroke stays crisp.
+                    let lateral = 1.0 - ((u - 0.5) - d.light_x * 0.20).abs() * 0.70;
+                    let lobe_ex = (u - (0.5 - d.light_x * 0.26)) / 0.78;
+                    let lobe = (-(lobe_ex * lobe_ex + lobe_ey * lobe_ey) * 1.6).exp();
+                    let mut a = row_a * lateral.clamp(0.45, 1.0) + g * lobe * 0.42;
+                    // Fade the gloss right at the edge so the stroke stays crisp.
                     if sdf > -3.0 {
-                        a *= ((-sdf + 0.5) / 3.5).clamp(0.0, 1.0).max(0.15);
+                        a *= ((-sdf) / 3.0).clamp(0.0, 1.0).max(0.15);
                     }
                     if a < 0.012 { continue; }
                     Self::blend_pixel(img, px, py, Rgba([255, 255, 255, (a * 255.0).round().clamp(0.0, 255.0) as u8]));
@@ -1832,8 +2426,7 @@ impl IconCanvas {
             let blur = d.inner_depth_blur;
             for py in 0..CANVAS_SIZE {
                 for px in 0..CANVAS_SIZE {
-                    let (sdf, _) =
-                        Self::rounded_rect_sdf_normal(px as f32 + 0.5, py as f32 + 0.5, size, size, r);
+                    let (sdf, _) = sdf_at(px, py);
                     if sdf >= 0.0 || -sdf > blur { continue; }
                     if img.get_pixel(px, py)[3] < 10 { continue; }
                     // Darkness grows away from the light (planar gradient).
@@ -1858,8 +2451,7 @@ impl IconCanvas {
                 if t <= 0.0 { continue; }
                 let row_a = t * t * s;
                 for px in 0..CANVAS_SIZE {
-                    let (sdf, _) =
-                        Self::rounded_rect_sdf_normal(px as f32 + 0.5, py as f32 + 0.5, size, size, r);
+                    let (sdf, _) = sdf_at(px, py);
                     if sdf >= 0.0 { continue; }
                     if img.get_pixel(px, py)[3] < 10 { continue; }
                     if row_a < 0.012 { continue; }
@@ -1876,10 +2468,9 @@ impl IconCanvas {
                 let v = py as f32 / size;
                 let vertical = 0.35 + 0.65 * (1.0 - v);
                 for px in 0..CANVAS_SIZE {
-                    let (sdf, n) =
-                        Self::rounded_rect_sdf_normal(px as f32 + 0.5, py as f32 + 0.5, size, size, r);
+                    let (sdf, nv) = sdf_at(px, py);
                     if sdf >= 0.0 || -sdf > ew { continue; }
-                    let rim = (n[0] * d.light_x + n[1] * d.light_y).max(0.15);
+                    let rim = (nv[0] * d.light_x + nv[1] * d.light_y).max(0.15);
                     let a = (-sdf / ew) * rim * vertical * d.edge_highlight_opacity;
                     if a < 0.01 { continue; }
                     Self::blend_pixel(img, px, py, Rgba([255, 255, 255, (a * 255.0).round() as u8]));
@@ -1888,10 +2479,9 @@ impl IconCanvas {
             // Thin dark outer rim on the shadow side for definition.
             for py in 0..CANVAS_SIZE {
                 for px in 0..CANVAS_SIZE {
-                    let (sdf, n) =
-                        Self::rounded_rect_sdf_normal(px as f32 + 0.5, py as f32 + 0.5, size, size, r);
+                    let (sdf, nv) = sdf_at(px, py);
                     if sdf >= 0.0 || sdf < -2.0 { continue; }
-                    let away = (-(n[0] * d.light_x + n[1] * d.light_y)).max(0.0);
+                    let away = (-(nv[0] * d.light_x + nv[1] * d.light_y)).max(0.0);
                     if away <= 0.05 { continue; }
                     let a = away * d.shade_opacity * 0.9;
                     if a < 0.012 { continue; }
@@ -1907,8 +2497,7 @@ impl IconCanvas {
         // alpha), which read as a dark fringe and blocked flood fills.
         for py in 0..CANVAS_SIZE {
             for px in 0..CANVAS_SIZE {
-                let (sdf, _) =
-                    Self::rounded_rect_sdf_normal(px as f32 + 0.5, py as f32 + 0.5, size, size, r);
+                let (sdf, _) = sdf_at(px, py);
                 if sdf >= 0.5 {
                     img.put_pixel(px, py, Rgba([0, 0, 0, 0]));
                 } else if sdf > -0.5 {
@@ -1944,26 +2533,6 @@ impl IconCanvas {
             pixel[1] = (ng * 255.0).round().clamp(0.0, 255.0) as u8;
             pixel[2] = (nb * 255.0).round().clamp(0.0, 255.0) as u8;
         }
-    }
-
-    /// Signed distance plus outward surface normal of a centered rounded rect
-    /// (negative distance = inside).
-    fn rounded_rect_sdf_normal(px: f32, py: f32, w: f32, h: f32, r: f32) -> (f32, [f32; 2]) {
-        let half_w = w / 2.0;
-        let half_h = h / 2.0;
-        let r = r.min(half_w).min(half_h);
-        let cx = half_w + (px - half_w).clamp(-half_w + r, half_w - r);
-        let cy = half_h + (py - half_h).clamp(-half_h + r, half_h - r);
-        let dx = px - cx;
-        let dy = py - cy;
-        let len = (dx * dx + dy * dy).sqrt();
-        let sdf = len - r;
-        let n = if len > 0.0001 {
-            [dx / len, dy / len]
-        } else {
-            [0.0, -1.0]
-        };
-        (sdf, n)
     }
 
     fn luma(r: f32, g: f32, b: f32) -> f32 {
@@ -2051,9 +2620,9 @@ impl IconCanvas {
         Ok(())
     }
 
-    // ═══════════════════════════════════════════════════════════════
-    // change_color — tint an existing icon to a target color
-    // ═══════════════════════════════════════════════════════════════
+    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // change_color â€” tint an existing icon to a target color
+    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
     /// Tint an existing icon to a target color with configurable intensity,
     /// then apply depth effects. The depth effects (shadow, specular,
@@ -2140,9 +2709,9 @@ impl IconCanvas {
         Ok(())
     }
 
-    // ═══════════════════════════════════════════════════════════════
-    // dark_light_mode — switch icon background between dark/light
-    // ═══════════════════════════════════════════════════════════════
+    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // dark_light_mode â€” switch icon background between dark/light
+    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
     /// Switch an icon between dark and light mode by detecting the
     /// background color and replacing it.
@@ -2250,10 +2819,12 @@ impl IconCanvas {
             shade_opacity: self.shade_opacity,
             light_x: self.light_x,
             light_y: self.light_y,
+            corner_exponent: self.corner_exponent,
+            artwork_emboss: self.artwork_emboss,
         }
     }
 
-    // ── Background rendering ───────────────────────────────
+    // â”€â”€ Background rendering â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     fn draw_background(&self, img: &mut RgbaImage) {
         match &self.background {
@@ -2284,7 +2855,7 @@ impl IconCanvas {
         }
     }
 
-    // ── Layer rendering ────────────────────────────────────
+    // â”€â”€ Layer rendering â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     fn draw_layer(&self, img: &mut RgbaImage, layer: &Layer) {
         // Draw shadow first (behind the element)
@@ -2312,7 +2883,7 @@ impl IconCanvas {
         }
     }
 
-    // ── Shadow ─────────────────────────────────────────────
+    // â”€â”€ Shadow â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     fn draw_shadow(&self, img: &mut RgbaImage, layer: &Layer, shadow: &Shadow) {
         let shadow_color = Color::new(shadow.color.r, shadow.color.g, shadow.color.b, shadow.opacity);
@@ -2387,7 +2958,7 @@ impl IconCanvas {
         }
     }
 
-    // ── Shape drawing ──────────────────────────────────────
+    // â”€â”€ Shape drawing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     fn draw_rounded_rect(&self, img: &mut RgbaImage, x: f32, y: f32, w: f32, h: f32, r: f32, layer: &Layer) {
         let (uw, uh) = (w.max(1.0) as u32, h.max(1.0) as u32);
@@ -2531,7 +3102,7 @@ impl IconCanvas {
         }
     }
 
-    // ── Text ───────────────────────────────────────────────
+    // â”€â”€ Text â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     fn draw_text(&self, img: &mut RgbaImage, layer: &Layer, content: &str, font_size: f32) {
         // Try to load SF Pro from system paths, fallback to embedded default
@@ -2614,7 +3185,7 @@ impl IconCanvas {
         Vec::new()
     }
 
-    // ── Gradient ───────────────────────────────────────────
+    // â”€â”€ Gradient â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     fn draw_gradient_rect(img: &mut RgbaImage, x: f32, y: f32, w: f32, h: f32, gradient: &Gradient, opacity: f32) {
         for py in y as u32..((y + h) as u32).min(CANVAS_SIZE) {
@@ -2658,7 +3229,7 @@ impl IconCanvas {
         )
     }
 
-    // ── Helpers ────────────────────────────────────────────
+    // â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     fn resolve_fill_pixel(&self, layer: &Layer, _px: f32, py: f32, _x: f32, y: f32, _w: f32, h: f32) -> Rgba<u8> {
         let mut pixel = if let Some(gradient) = &layer.gradient {
@@ -2844,7 +3415,7 @@ impl IconCanvas {
         true
     }
 
-    /// Frosted-glass overlay — blends white over every opaque pixel so
+    /// Frosted-glass overlay â€” blends white over every opaque pixel so
     /// colours look lighter, as if viewed through frosted glass.
     fn draw_frosted(&self, img: &mut RgbaImage) {
         let a = self.frosted_opacity;
@@ -2869,7 +3440,7 @@ impl IconCanvas {
         dst[3] = (out_a * 255.0) as u8;
     }
 
-    // ── HSL conversion (for change_color) ────────────────────────
+    // â”€â”€ HSL conversion (for change_color) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     fn rgb_to_hsl(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
         let max = r.max(g).max(b);
