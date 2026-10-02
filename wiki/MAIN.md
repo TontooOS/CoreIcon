@@ -69,10 +69,15 @@ See [Generator.md](Generator.md), [Color.md](Color.md) and
 - 2026-10-02: App-icon look overhaul, driven by a comparison against Apple
   reference renders. New `DepthOptions::squircle_exponent` /
   `IconCanvas::squircle_exponent` plus `APPLE_SQUIRCLE_EXPONENT` (`5.0`): the
-  corner is now a real superellipse with continuous curvature instead of a
-  circular arc, and every depth band (specular, gloss, inner depth, edge
-  stroke, corner mask) follows the new signed distance field. `n = 2.0`
-  reproduces the old circular silhouette exactly. New
+  corner is now a superellipse with a selectable exponent
+  (`APPLE_SQUIRCLE_EXPONENT`, `2.0` = circular = the default) driven by one
+  signed distance field, and every depth band (specular, gloss, inner depth,
+  edge stroke, corner mask) follows it. The exponent is scaled by
+  `2^(1/n - 1/2)` so the 45-degree point stays put: a circular corner of
+  radius 232 already reproduces Apple's corner silhouette (68px per axis at 45
+  degrees, against 66px for the full-tile superellipse Apple approximates), and
+  raising the exponent only buys the gradual curvature ramp a circle lacks,
+  at the cost of squaring the corner off. New
   `DepthOptions::artwork_emboss` / `IconCanvas::artwork_emboss` (`0.0` off,
   `0.60` in the Apple preset): a raised-relief bevel on the artwork silhouette
   driven by a signed distance field, so glyphs read as extruded from the tile

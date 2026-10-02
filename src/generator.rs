@@ -150,8 +150,11 @@ pub struct DepthOptions {
     /// Bottom inner shade (grounds the icon). 0.0 = off, 0.18-0.22 = Apple.
     pub shade_opacity: f32,
     /// Corner-curve exponent of the icon mask. `2.0` is a plain circular
-    /// rounded rect, [`APPLE_SQUIRCLE_EXPONENT`] (`5.0`) is the Apple
-    /// continuous-curvature squircle. Every depth effect follows it.
+    /// corner, which is the default and already matches Apple's corner
+    /// silhouette at [`APPLE_CORNER_RADIUS`]. Values above `2.0` ramp the
+    /// curvature up gradually out of the straight edge (a circle jumps
+    /// straight to `1 / r` at the tangent point) at the cost of squaring
+    /// the corner off. Every depth effect follows it.
     pub corner_exponent: f32,
     /// Raised-relief emboss on the artwork silhouette. `0.0` = off,
     /// `0.45`-`0.70` = Apple-strong. Lightens glyph edges that face the
@@ -290,13 +293,22 @@ pub const DARK_REMAP_MAX_FRACTION: f32 = 0.10;
 /// Apple-style squircle radius for 1024px icons (22.65%).
 pub const APPLE_CORNER_RADIUS: f32 = 232.0;
 
-/// Corner-curve exponent of the Apple icon mask.
+/// Corner-curve exponent of the icon mask.
 ///
-/// `2.0` is a circular rounded rect (a plain quarter-circle corner);
-/// `5.0` is the continuous-curvature squircle Apple ships, where the
-/// curvature keeps growing out of the straight edge instead of jumping
-/// to `1 / radius` at the tangent point.
-pub const APPLE_SQUIRCLE_EXPONENT: f32 = 5.0;
+/// `2.0` is a circular corner and is the default, because a circular corner
+/// of radius [`APPLE_CORNER_RADIUS`] already reproduces Apple's corner
+/// silhouette: it cuts 68px per axis at 45 degrees, against 66px for the
+/// full-tile superellipse that Apple's own shape approximates.
+///
+/// Values above `2.0` make the corner progressively squarer, because the
+/// superellipse half-size is scaled to hold the 45-degree point in place
+/// while the curvature ramps up gradually out of the straight edge. That
+/// gradual ramp is the one thing a circle genuinely lacks - a circular
+/// corner has a curvature discontinuity where it meets the straight edge -
+/// but the same superellipse is also fuller right at the corner tip, so
+/// anything past roughly `2.5` reads as visibly squared off rather than as
+/// Apple's shape.
+pub const APPLE_SQUIRCLE_EXPONENT: f32 = 2.0;
 
 /// Maximum per-channel deviation from the local median that still counts as
 /// compression grain rather than real artwork detail.
@@ -932,10 +944,11 @@ impl IconCanvas {
     /// Apple Tahoe / iOS 26 squircle.
     pub fn corner_radius(mut self, r: f32) -> Self { self.corner_radius = r; self }
 
-    /// Set the corner-curve exponent. `2.0` gives a plain circular rounded
-    /// rect, [`APPLE_SQUIRCLE_EXPONENT`] (`5.0`) the Apple continuous
-    /// curvature squircle. The rim light, inner bevel, edge stroke and the
-    /// corner mask all follow the resulting curve.
+    /// Set the corner-curve exponent. `2.0` (the default) gives the circular
+    /// corner that matches Apple's silhouette at [`APPLE_CORNER_RADIUS`];
+    /// higher values ramp the curvature in gradually but square the corner
+    /// off. The rim light, inner bevel, edge stroke and the corner mask all
+    /// follow the resulting curve.
     pub fn squircle_exponent(mut self, n: f32) -> Self {
         self.corner_exponent = n.clamp(2.0, 8.0);
         self
@@ -2024,14 +2037,13 @@ impl IconCanvas {
 
     /// Squircle (superellipse) signed distance field and outward normal.
     ///
-    /// The corner is a superellipse `|u|^n + |v|^n = 1` in the `r x r`
-    /// corner box, blended into straight edges. `n = 2.0` reproduces the
-    /// plain circular corner exactly (quarter circle of radius `r`), so
-    /// callers that want the old silhouette can ask for `2.0`. `n = 5.0`
-    /// is the Apple shape: the curvature grows continuously out of the
+    /// The corner is a superellipse `|u|^n + |v|^n = 1` blended into straight
+    /// edges. `n = 2.0` is the plain circular corner of radius `r` and is the
+    /// default. Higher `n` ramps the curvature up gradually out of the
     /// straight edge instead of stepping to `1 / r` at the tangent point,
-    /// which is what makes the tile read as a squircle and not a rounded
-    /// rectangle.
+    /// which is the one thing a circular corner genuinely lacks - at the cost
+    /// of squaring the corner off, because the same superellipse is fuller
+    /// right at the corner tip. See [`APPLE_SQUIRCLE_EXPONENT`].
     ///
     /// Returns `(distance, normal)`. `distance` is negative inside the
     /// shape and is a true Euclidean distance in pixels, so band-limited
@@ -2044,30 +2056,40 @@ impl IconCanvas {
         let half_h = h / 2.0;
         let r = r.min(half_w).min(half_h).max(0.0);
         let n = n.clamp(2.0, 8.0);
+        // Superellipse half-size, scaled so its 45-degree point lands where a
+        // circular corner of radius `r` would put it.
+        //
+        // Anchoring on the 45-degree point keeps the corner from moving as
+        // `n` rises. Without it, using `r` directly would hold the corner
+        // *box* fixed and push the 45-degree point outward, squaring the
+        // corner off badly: a superellipse of `n = 5` inside a 232px box
+        // cuts only 30px per axis, against 68px for the circle. `n = 2.0`
+        // reduces to `2^(1/2 - 1/2) = 1`, i.e. the untouched circle.
+        let rr = r * 2.0f32.powf(1.0 / n - 0.5);
         let x = px - half_w;
         let y = py - half_h;
         let ax = x.abs();
         let ay = y.abs();
         // How far past the straight-edge zone we are on each axis. Negative
         // means the pixel is still inside the flat part of that axis.
-        let qx = ax - (half_w - r);
-        let qy = ay - (half_h - r);
+        let qx = ax - (half_w - rr);
+        let qy = ay - (half_h - rr);
 
         // Only the corner box needs the curve. Clamping to zero is what makes
         // the field fall back to the straight edges: a pixel past the flat
         // zone on x but still inside it on y must measure to the x edge, not
         // be treated as if it were out in the corner.
-        let u = qx.max(0.0) / r;
-        let v = qy.max(0.0) / r;
+        let u = qx.max(0.0) / rr;
+        let v = qy.max(0.0) / rr;
         let s = u.powf(n) + v.powf(n);
 
         // Straight-edge region: both offsets zero, so the superellipse
         // gradient vanishes. Measure to the nearest of the four edges.
         if s < 1.0e-6 {
             let (d, nvec) = if qx < qy {
-                (qx - r, [if x < 0.0 { -1.0 } else { 1.0 }, 0.0])
+                (qx - rr, [if x < 0.0 { -1.0 } else { 1.0 }, 0.0])
             } else {
-                (qy - r, [0.0, if y < 0.0 { -1.0 } else { 1.0 }])
+                (qy - rr, [0.0, if y < 0.0 { -1.0 } else { 1.0 }])
             };
             return (d, nvec);
         }
@@ -2078,9 +2100,9 @@ impl IconCanvas {
         let gu = k * u.powf(n - 1.0);
         let gv = k * v.powf(n - 1.0);
         let glen = (gu * gu + gv * gv).sqrt().max(1.0e-6);
-        // Pixel-space gradient carries the 1 / r of the normalization, so
+        // Pixel-space gradient carries the 1 / rr of the normalization, so
         // dividing by it turns the implicit offset into a distance.
-        let d = f * r / glen;
+        let d = f * rr / glen;
         (
             d,
             [

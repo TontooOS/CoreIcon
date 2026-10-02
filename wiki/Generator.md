@@ -49,10 +49,10 @@ post-processing effects start at zero.
 | Method | Signature | Description |
 |---|---|---|
 | `background` | `background(bg: Background) -> Self` | Fill the entire canvas |
-| `corner_radius` | `corner_radius(r: f32) -> Self` | Round the canvas edges (`0` = square, `APPLE_CORNER_RADIUS` = `232.0` for the Apple squircle) |
-| `squircle_exponent` | `squircle_exponent(n: f32) -> Self` | Corner-curve exponent: `2.0` = circular rounded rect, `APPLE_SQUIRCLE_EXPONENT` (`5.0`) = Apple continuous curvature. Clamped to `2.0`–`8.0` |
-| `artwork_emboss` | `artwork_emboss(s: f32) -> Self` | Raised-relief bevel on the layer silhouettes, `0.0`–`1.0` |
-| `frosted` | `frosted(opacity: f32) -> Self` | White glass wash, `0.0`–`1.0` |
+| `corner_radius` | `corner_radius(r: f32) -> Self` | Round the canvas edges (`0` = square, `APPLE_CORNER_RADIUS` = `232.0` matches the Apple corner silhouette) |
+| `squircle_exponent` | `squircle_exponent(n: f32) -> Self` | Corner-curve exponent, `2.0` circular (default) to `8.0` squared off |
+| `artwork_emboss` | `artwork_emboss(s: f32) -> Self` | Raised-relief bevel on the layer silhouettes, `0.0`â€“`1.0` |
+| `frosted` | `frosted(opacity: f32) -> Self` | White glass wash, `0.0`â€“`1.0` |
 | `specular` | `specular(opacity: f32) -> Self` | Glossy rim highlight on light-facing edges |
 | `gloss` | `gloss(opacity: f32) -> Self` | Full-surface top gloss plus one broad off-center reflection lobe (Apple Liquid Glass) |
 | `vibrancy` | `vibrancy(v: f32) -> Self` | Saturation + contrast pop for flat artwork |
@@ -104,17 +104,26 @@ Every value can be overridden by calling the individual builders afterwards.
 
 ### Squircle mask
 
-The corner is a superellipse `|u|^n + |v|^n = 1` inside the `r x r` corner box,
-blended into straight edges. `n = 2.0` reproduces a plain circular rounded
-rect exactly, so callers that want the old silhouette ask for `2.0`.
-`n = 5.0` (`APPLE_SQUIRCLE_EXPONENT`) is the Apple shape: the curvature grows
-continuously out of the straight edge instead of stepping to `1 / r` at the
-tangent point.
+The corner is a superellipse `|u|^n + |v|^n = 1` blended into straight edges.
+The superellipse half-size is scaled by `2^(1/n - 1/2)` so that its 45-degree
+point lands where a circular corner of radius `r` would put it.
 
 | Constant | Value | Meaning |
 |---|---|---|
-| `APPLE_CORNER_RADIUS` | `232.0` | Corner box size for a 1024px icon (22.65%) |
-| `APPLE_SQUIRCLE_EXPONENT` | `5.0` | Apple continuous-curvature exponent |
+| `APPLE_CORNER_RADIUS` | `232.0` | Corner radius for a 1024px icon (22.65%) |
+| `APPLE_SQUIRCLE_EXPONENT` | `2.0` | Circular corner, the default |
+
+`n = 2.0` reduces to `2^(1/2 - 1/2) = 1`, so the default is exactly a circular
+corner - and that already reproduces Apple's corner silhouette. It cuts 68px
+per axis at 45 degrees, against 66px for the full-tile superellipse that
+Apple's own shape approximates.
+
+Raising `n` ramps the curvature up gradually out of the straight edge instead
+of stepping to `1 / r` at the tangent point, which is the one thing a circular
+corner genuinely lacks. The trade-off is that the same superellipse is fuller
+right at the corner tip, so anything past roughly `2.5` reads as visibly
+squared off rather than as Apple's shape. Use `.squircle_exponent(n)` on
+`DepthOptions` / `IconCanvas` to trade one for the other.
 
 The field is a true Euclidean distance in pixels (negative inside), so
 band-limited effects can window it directly. Pixels past the flat zone on one
@@ -281,7 +290,6 @@ For the Apple Liquid Glass look, either combine them manually or use
 ```rust
 let icon = IconCanvas::new()
     .corner_radius(232.0)
-    .squircle_exponent(5.0)
     .gloss(0.20)
     .vibrancy(0.24)
     .specular(0.55)
@@ -419,7 +427,7 @@ Builder for all depth effects; defaults switch every effect off.
 | `DepthOptions::new(corner_radius)` | Start with a corner radius, effects off |
 | `.shadow(s)` | Dual drop shadow: large soft ambient + tight key (`Shadow`); key is synthesized when `blur > 12` |
 | `.artwork_shadow(s)` | Glyph drop shadow onto the background (file pipeline only; foreground = inverse of the border flood mask) |
-| `.artwork_emboss(strength)` | Raised relief on the artwork silhouette, `0.0` off / `0.45`–`0.70` Apple-strong |
+| `.artwork_emboss(strength)` | Raised relief on the artwork silhouette, `0.0` off / `0.45`â€“`0.70` Apple-strong |
 | `.inner_depth(blur, opacity)` | Inner bevel away from the light |
 | `.specular(opacity)` | Rim highlight toward the light |
 | `.gloss(opacity)` | Top gloss + broad reflection lobe |
@@ -442,7 +450,7 @@ Apple presets:
 
 ```rust
 pub const APPLE_CORNER_RADIUS: f32 = 232.0;
-pub const APPLE_SQUIRCLE_EXPONENT: f32 = 5.0;
+pub const APPLE_SQUIRCLE_EXPONENT: f32 = 2.0;
 pub fn default_app_icon_depth() -> DepthOptions; // Apple-strong AppIcon finish
 pub fn apple_liquid_glass(corner_radius: f32) -> DepthOptions; // same finish, custom radius
 ```
@@ -541,12 +549,12 @@ Parameters:
 | `shadow_offset_x` | Horizontal shadow shift in pixels |
 | `shadow_offset_y` | Vertical shadow shift in pixels |
 | `shadow_blur` | Shadow blur radius in pixels |
-| `shadow_opacity` | Shadow strength, `0.0`–`1.0` |
+| `shadow_opacity` | Shadow strength, `0.0`â€“`1.0` |
 | `inner_depth_blur` | Inner bevel blur radius; `0` to disable |
-| `inner_depth_opacity` | Inner bevel strength, `0.0`–`1.0` |
-| `specular_opacity` | Glossy highlight strength, `0.0`–`1.0` |
+| `inner_depth_opacity` | Inner bevel strength, `0.0`â€“`1.0` |
+| `specular_opacity` | Glossy highlight strength, `0.0`â€“`1.0` |
 | `edge_highlight_width` | Edge highlight thickness in pixels; `0` to disable |
-| `edge_highlight_opacity` | Edge highlight strength, `0.0`–`1.0` |
+| `edge_highlight_opacity` | Edge highlight strength, `0.0`â€“`1.0` |
 
 Pass `None` for any effect you want to skip.
 
@@ -647,12 +655,12 @@ Parameters:
 | `shadow_offset_x` | Horizontal shadow shift in pixels |
 | `shadow_offset_y` | Vertical shadow shift in pixels |
 | `shadow_blur` | Shadow blur radius in pixels |
-| `shadow_opacity` | Shadow strength, `0.0`–`1.0` |
+| `shadow_opacity` | Shadow strength, `0.0`â€“`1.0` |
 | `inner_depth_blur` | Inner bevel blur radius; `0` to disable |
-| `inner_depth_opacity` | Inner bevel strength, `0.0`–`1.0` |
-| `specular_opacity` | Glossy highlight strength, `0.0`–`1.0` |
+| `inner_depth_opacity` | Inner bevel strength, `0.0`â€“`1.0` |
+| `specular_opacity` | Glossy highlight strength, `0.0`â€“`1.0` |
 | `edge_highlight_width` | Edge highlight thickness in pixels; `0` to disable |
-| `edge_highlight_opacity` | Edge highlight strength, `0.0`–`1.0` |
+| `edge_highlight_opacity` | Edge highlight strength, `0.0`â€“`1.0` |
 
 ### `change_color_and_save`
 
@@ -832,7 +840,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ## Cross References
 
 - [TintMatrix.md](TintMatrix.md) - color-matrix recoloring used by `Layer.tint_matrix` and `RecolorOptions`
-- [SFSymbol.md](SFSymbol.md) – symbol constants rendered via `LayerContent::Icon`
-- [Color.md](Color.md) – fills, tints and shadows
-- [Gradient.md](Gradient.md) – background and layer gradients
-- [SFSymbolView.md](SFSymbolView.md) – styled symbol views
+- [SFSymbol.md](SFSymbol.md) â€“ symbol constants rendered via `LayerContent::Icon`
+- [Color.md](Color.md) â€“ fills, tints and shadows
+- [Gradient.md](Gradient.md) â€“ background and layer gradients
+- [SFSymbolView.md](SFSymbolView.md) â€“ styled symbol views

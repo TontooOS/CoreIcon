@@ -21,7 +21,7 @@ Both APIs live in `CoreIcon::generator`:
 pub enum Appearance { Light, Dark }
 pub const DARK_BACKGROUND: Color; // TontooOS dark #1d1d1d
 pub const APPLE_CORNER_RADIUS: f32 = 232.0;
-pub const APPLE_SQUIRCLE_EXPONENT: f32 = 5.0;
+pub const APPLE_SQUIRCLE_EXPONENT: f32 = 2.0;
 pub fn default_app_icon_depth() -> DepthOptions;
 pub fn apple_liquid_glass(corner_radius: f32) -> DepthOptions;
 
@@ -40,8 +40,8 @@ icon.save("app-icon.png")?;
 
 Takes any flat image, trims it to its opaque bounding box, scales it to
 completely fill 1024x1024 (full-bleed, no transparent margin), rounds it into
-the Apple squircle (`APPLE_CORNER_RADIUS 232`, exponent
-`APPLE_SQUIRCLE_EXPONENT 5`) and adds the Apple Liquid Glass finish: dual drop
+the Apple corner shape (`APPLE_CORNER_RADIUS 232`) and adds the Apple Liquid
+Glass finish: dual drop
 shadow (ambient + key), raised-relief emboss on the artwork, vibrancy pop, wide
 inner bevel, rim specular, top gloss, bottom shade and an anti-aliased corner
 mask. Colors are left completely untouched.
