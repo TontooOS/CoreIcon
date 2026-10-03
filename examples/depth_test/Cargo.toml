@@ -1,8 +1,0 @@
-[package]
-name = "depth-test"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-CoreIcon = { path = "../..", package = "coreicon" }
-coreimage = { package = "coreimage", path = "../../../CoreImage" }
