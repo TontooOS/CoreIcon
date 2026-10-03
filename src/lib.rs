@@ -3578,6 +3578,7 @@ pub const RUPEESIGN_CIRCLE: SFSymbol = SFSymbol { name: "rupeesign.circle" };
 pub const RUPEESIGN_CIRCLE_FILL: SFSymbol = SFSymbol { name: "rupeesign.circle.fill" };
 pub const RUPEESIGN_SQUARE: SFSymbol = SFSymbol { name: "rupeesign.square" };
 pub const RUPEESIGN_SQUARE_FILL: SFSymbol = SFSymbol { name: "rupeesign.square.fill" };
+pub const RUST: SFSymbol = SFSymbol { name: "rust" };
 pub const S_CIRCLE: SFSymbol = SFSymbol { name: "s.circle" };
 pub const S_CIRCLE_FILL: SFSymbol = SFSymbol { name: "s.circle.fill" };
 pub const S_SQUARE: SFSymbol = SFSymbol { name: "s.square" };
@@ -7750,6 +7751,7 @@ pub const ALL: &[SFSymbol] = &[
     RUPEESIGN_CIRCLE_FILL,
     RUPEESIGN_SQUARE,
     RUPEESIGN_SQUARE_FILL,
+    RUST,
     S_CIRCLE,
     S_CIRCLE_FILL,
     S_SQUARE,

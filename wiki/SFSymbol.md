@@ -53,6 +53,11 @@ registered. The search is case-sensitive.
 
 ## Asset directory
 
+> **Note:** Not every registered symbol is an Apple SF Symbol. `RUST` (the Rust
+> language logo, `rust.png`) is a TontooOS addition that lives in the same
+> `assets/icons/` folder, so it is registered in `ALL` and resolves exactly like
+> the Apple symbols.
+
 The runtime asset directory is `ASSETS_DIR` (`assets/icons`) in the crate root
 and an independent `generator::ASSETS_DIR` used by the renderer. Point the
 generator's `ASSETS_DIR` at the actual assets folder at runtime before

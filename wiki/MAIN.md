@@ -66,6 +66,15 @@ See [Generator.md](Generator.md), [Color.md](Color.md) and
 
 ## Changelog
 
+- 2026-10-03: `rust.png` was shipped in `assets/icons/` without a matching
+  entry in the generated registry, so the asset was unreachable from the typed
+  API: `coreicon::RUST` did not compile and `SFSymbol::from_name("rust")`
+  returned `None` (only string-based paths such as
+  `SFSymbolImage::new("rust")` resolved it). Added
+  `pub const RUST: SFSymbol = SFSymbol { name: "rust" }` and the `ALL` entry,
+  bringing the registry back in sync with the folder (4171 constants / 4171
+  PNGs). See [SFSymbol.md](SFSymbol.md).
+
 - 2026-10-02: App-icon look overhaul, driven by a comparison against Apple
   reference renders. New `DepthOptions::squircle_exponent` /
   `IconCanvas::squircle_exponent` plus `APPLE_SQUIRCLE_EXPONENT` (`5.0`): the
